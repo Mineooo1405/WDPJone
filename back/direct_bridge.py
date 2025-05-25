@@ -79,17 +79,21 @@ class TrajectoryCalculator:
             self.robot_data[unique_robot_key] = {
                 "x": 0.0, "y": 0.0, "theta": 0.0,
                 "last_timestamp_encoder": None,
-                "path_history": [{"x": 0.0, "y": 0.0, "theta": 0.0}], # Start with origin
+                "path_history": [],
                 "latest_imu_data": None
             }
 
     def update_imu_data(self, unique_robot_key, imu_data):
         self._ensure_robot_data(unique_robot_key)
-        # Assuming imu_data contains {"timestamp": ..., "yaw": ..., ...} or {"euler": [r,p,y], ...}
-        # Store the necessary parts, e.g., yaw and timestamp
+        # Accepts either {"yaw": ...} or {"euler": [roll, pitch, yaw]}
+        yaw = None
+        if "yaw" in imu_data:
+            yaw = imu_data["yaw"]
+        elif "euler" in imu_data and len(imu_data["euler"]) == 3:
+            yaw = imu_data["euler"][2]
+        if yaw is not None:
+            self.robot_data[unique_robot_key]["theta"] = yaw
         self.robot_data[unique_robot_key]["latest_imu_data"] = imu_data
-        # logger.debug(f"Updated IMU for {unique_robot_key}: {imu_data.get('timestamp')}")
-
 
     def _rpm_to_omega(self, rpm):
         return rpm * (2 * math.pi) / 60.0
@@ -97,85 +101,50 @@ class TrajectoryCalculator:
     def update_encoder_data(self, unique_robot_key, encoder_data):
         self._ensure_robot_data(unique_robot_key)
         robot_state = self.robot_data[unique_robot_key]
-
         imu_data = robot_state["latest_imu_data"]
         if not imu_data:
-            # logger.warning(f"No IMU data for {unique_robot_key} to calculate trajectory with encoder data.")
-            return None, None
-
-        # Extract data (adjust keys as per actual incoming data structure)
-        # Assuming encoder_data = {"encoders": [rpm1, rpm2, rpm3], "timestamp": float_seconds}
-        # Assuming imu_data = {"yaw": float_radians, "timestamp": float_seconds} or {"euler": [r,p,y_rad]}
-        
-        try:
-            rpms = encoder_data.get("encoders") # Expected: list of 3 RPMs
-            timestamp_encoder = encoder_data.get("timestamp")
-
-            if rpms is None or timestamp_encoder is None or len(rpms) < 3:
-                # logger.error(f"Invalid encoder data for {unique_robot_key}: {encoder_data}")
-                return None, None
-
-            current_heading_rad = imu_data.get("yaw") 
-            if current_heading_rad is None and "euler" in imu_data and isinstance(imu_data["euler"], list) and len(imu_data["euler"]) == 3:
-                 current_heading_rad = imu_data["euler"][2] # Yaw from euler angles
+            logger.warning(f"IMU data not available for {unique_robot_key}. Returning current state for trajectory update.")
+            current_pose = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+            return current_pose, robot_state["path_history"]
             
-            if current_heading_rad is None:
-                # logger.error(f"Invalid IMU data (no yaw/euler) for {unique_robot_key}: {imu_data}")
-                return None, None
-
-        except Exception as e:
-            # logger.error(f"Error extracting data for trajectory calculation for {unique_robot_key}: {e}")
-            return None, None
-
+        # Extract timestamp and RPMs
+        timestamp_encoder = encoder_data.get("timestamp", time.time())
+        rpms = encoder_data.get("data", encoder_data.get("encoders", []))
+        if not (isinstance(rpms, list) and len(rpms) == 3):
+            logger.warning(f"Invalid RPM data for {unique_robot_key}: {rpms}. Returning current state for trajectory update.")
+            current_pose = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+            return current_pose, robot_state["path_history"]
+            
+        # Get heading from IMU
+        if "yaw" in imu_data:
+            current_heading_rad = imu_data["yaw"]
+        elif "euler" in imu_data and len(imu_data["euler"]) == 3:
+            current_heading_rad = imu_data["euler"][2]
+        else:
+            current_heading_rad = robot_state["theta"]
         if robot_state["last_timestamp_encoder"] is None:
             robot_state["last_timestamp_encoder"] = timestamp_encoder
-            # logger.info(f"Initialized first timestamp for {unique_robot_key}")
-            # Update current pose with initial IMU heading
-            robot_state["theta"] = current_heading_rad
-            robot_state["path_history"] = [{"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}]
-            return {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}, list(robot_state["path_history"])
-
-
+            return None  # No movement yet
         dt = timestamp_encoder - robot_state["last_timestamp_encoder"]
-        if dt <= 0: # Avoid division by zero or backward time
-            # logger.warning(f"dt <= 0 for {unique_robot_key}. Current: {timestamp_encoder}, Last: {robot_state['last_timestamp_encoder']}")
-            # Update last_timestamp_encoder to prevent getting stuck if timestamps are messy
-            robot_state["last_timestamp_encoder"] = timestamp_encoder
-            return None, None # Or return current state without change
-
+        if dt <= 0:
+            return None
         robot_state["last_timestamp_encoder"] = timestamp_encoder
-
         omega_m1, omega_m2, omega_m3 = [self._rpm_to_omega(rpm) for rpm in rpms]
-
-        # Kinematics model from PlotQuyDao.py (adjust if necessary)
-        # vx_robot = WHEEL_RADIUS_DEFAULT / 3.0 * (-omega_m1 + 0.5 * omega_m2 + 0.5 * omega_m3)
-        # vy_robot = WHEEL_RADIUS_DEFAULT / 3.0 * ( (math.sqrt(3)/2.0) * omega_m2 - (math.sqrt(3)/2.0) * omega_m3)
-        # Simpler model for testing (assuming direct relation, adjust as per your robot)
-        # This is a placeholder, replace with your robot's actual forward kinematics
-        vx_robot = WHEEL_RADIUS_DEFAULT * (omega_m1 + omega_m2 + omega_m3) / 3.0 # Simplistic average
-        vy_robot = 0 # Assuming no sideways movement from this simple model
-
-        # Transform robot frame velocities to world frame
-        cos_h = math.cos(robot_state["theta"]) # Use previous theta for rotation of velocity vector
+        # Simple kinematics: vx = avg(omegas) * wheel_radius
+        vx_robot = WHEEL_RADIUS_DEFAULT * (omega_m1 + omega_m2 + omega_m3) / 3.0
+        vy_robot = 0  # For 3-wheel omni, you may want to use a more complex model
+        cos_h = math.cos(robot_state["theta"])
         sin_h = math.sin(robot_state["theta"])
-
         vx_world = vx_robot * cos_h - vy_robot * sin_h
         vy_world = vx_robot * sin_h + vy_robot * cos_h
-
-        # Update position
         robot_state["x"] += vx_world * dt
         robot_state["y"] += vy_world * dt
-        robot_state["theta"] = current_heading_rad # Update heading from IMU directly
-
+        robot_state["theta"] = current_heading_rad
         new_point = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
         robot_state["path_history"].append(new_point)
-
         if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
-            robot_state["path_history"].pop(0)
-        
-        current_pose = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
-        # logger.debug(f"New pose for {unique_robot_key}: {current_pose}, path length: {len(robot_state['path_history'])}")
-        return current_pose, list(robot_state["path_history"]) # Return a copy
+            robot_state["path_history"] = robot_state["path_history"][-MAX_TRAJECTORY_POINTS_DEFAULT:]
+        return {"position": new_point, "path": list(robot_state["path_history"])}
 
 # --- broadcast_to_subscribers, calculate_distance, DataLogger (như cũ, DataLogger uses unique_robot_key) ---
 async def broadcast_to_subscribers(data_type, robot_alias, message_payload): # Added robot_alias
@@ -816,30 +785,28 @@ class DirectBridge:
                                 # logger.debug(f"No fresh IMU data for {unique_robot_key} when processing encoder data. Calculator will use its last known IMU state.")
 
                             current_pose, path_history = self.trajectory_calculator.update_encoder_data(
-                                unique_robot_key,       # String key: "ip:port"
-                                payload_for_calculator  # Dict: {"encoders": [...], "timestamp": ...}
+                                unique_robot_key,
+                                message_from_robot # Pass the original message_dict
                             )
+                            
+                            # Add these log lines for debugging:
+                            logger.info(f"DEBUG: current_pose from trajectory_calculator: {current_pose}, type: {type(current_pose)}")
+                            logger.info(f"DEBUG: path_history from trajectory_calculator: {path_history}, type: {type(path_history)}")
 
-                            if current_pose and path_history:
-                                trajectory_payload = {
-                                    "type": "realtime_trajectory", # For TrajectoryWidget subscription
-                                    "robot_ip": robot_ip_address,
+                            if current_pose and path_history is not None: # path_history can be an empty list
+                                trajectory_message_for_ws = {
+                                    "type": "realtime_trajectory",
+                                    "robot_ip": robot_ip_address , # Use the actual IP
                                     "robot_alias": current_alias,
-                                    "position": current_pose, # {"x": ..., "y": ..., "theta": ...}
-                                    "path": path_history,     # [{"x": ..., "y": ..., "theta": ...}, ...]
-                                    "timestamp": time.time()  # Timestamp of this trajectory update event
+                                    "timestamp": time.time(), 
+                                    "position": current_pose, # This IS the pose object e.g. {"x": 0.1, "y": 0.2, "theta": 0.0}
+                                    "path": path_history     # This IS the list of points e.g. [{"x":0,"y":0},{"x":0.1,"y":0.2}]
                                 }
-                                
-                                # Log the position update part of the trajectory
-                                log_pos_update_for_data_logger = {
-                                    "timestamp": trajectory_payload["timestamp"],
-                                    "position": trajectory_payload["position"],
-                                    "robot_ip": robot_ip_address,
-                                    "robot_alias": current_alias
-                                }
-                                self.data_logger.log_data(unique_robot_key, "position_update", log_pos_update_for_data_logger)
-                                
-                                await self.broadcast_to_subscribers(current_alias, trajectory_payload)
+                                # logger.debug(f"Broadcasting realtime_trajectory for {current_alias}: {trajectory_message_for_ws}")
+                                await self.broadcast_to_subscribers(current_alias, trajectory_message_for_ws)
+                            else:
+                                logger.warning(f"Skipping trajectory broadcast for {current_alias} due to missing pose or path.")
+                        
                         else:
                             logger.warning(f"Invalid or incomplete encoder_data in transformed_message from {current_alias} (needs 'data' as list >=3, and 'timestamp'): {transformed_message}")
                         
@@ -1400,10 +1367,12 @@ class DirectBridge:
                             }))
                             continue
                         
+                                               
                         tcp_client_tuple = ConnectionManager.get_tcp_client(unique_key_to_send)
                         if tcp_client_tuple:
                             _, writer_to_use = tcp_client_tuple # Unpack reader, writer
                             # Get the definitive alias for logging/response
+
                             actual_alias_for_response = target_alias
                             async with robot_alias_manager["lock"]:
                                 alias_from_map = robot_alias_manager["ip_port_to_alias"].get(unique_key_to_send)
