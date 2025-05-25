@@ -1,0 +1,3 @@
+1747167014.765 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747167014.7654061, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Path clear.", "level": "INFO"}}
+1747167019.762 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747167019.7620738, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Path clear.", "level": "INFO"}}
+1747167024.813 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747167024.8128057, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Obstacle detected.", "level": "DEBUG"}}

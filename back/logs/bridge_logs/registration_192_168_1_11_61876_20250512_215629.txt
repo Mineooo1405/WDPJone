@@ -1,0 +1,1 @@
+1747061802.043 {"type": "registration", "robot_id": "robot1", "original_id_field": "unknown_id_in_payload", "timestamp": 1747061802.0431523, "robot_ip": "192.168.1.11", "robot_alias": "robot1"}

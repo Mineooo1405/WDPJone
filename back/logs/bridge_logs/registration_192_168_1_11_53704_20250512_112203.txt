@@ -1,0 +1,1 @@
+1747023810.295 {"type": "registration", "robot_id": "robot1", "original_id_field": "unknown_id_in_payload", "timestamp": 1747023810.2947235, "robot_ip": "192.168.1.11", "robot_alias": "robot2"}

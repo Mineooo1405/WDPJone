@@ -1,0 +1,1 @@
+1747122082.169 {"type": "registration", "robot_id": "robot1", "capabilities": ["imu", "encoder", "log"], "timestamp": 1747122082.1685112, "original_id_field": "unknown_id_in_payload", "robot_ip": "127.0.0.1", "robot_alias": "robot1"}
