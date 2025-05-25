@@ -1,4 +1,0 @@
-1748139452.963 {"robot_ip": "127.0.0.1", "robot_alias": "robot2", "timestamp": 1748139452.963206, "type": "generic_log", "data": {"id": "robot1", "type": "log", "data": {"message": "Hehe from robot1"}}}
-1748139467.963 {"robot_ip": "127.0.0.1", "robot_alias": "robot2", "timestamp": 1748139467.9632082, "type": "generic_log", "data": {"id": "robot1", "type": "log", "data": {"message": "Hehe from robot1"}}}
-1748139482.965 {"robot_ip": "127.0.0.1", "robot_alias": "robot2", "timestamp": 1748139482.9650466, "type": "generic_log", "data": {"id": "robot1", "type": "log", "data": {"message": "Hehe from robot1"}}}
-1748139497.965 {"robot_ip": "127.0.0.1", "robot_alias": "robot2", "timestamp": 1748139497.9653385, "type": "generic_log", "data": {"id": "robot1", "type": "log", "data": {"message": "Hehe from robot1"}}}

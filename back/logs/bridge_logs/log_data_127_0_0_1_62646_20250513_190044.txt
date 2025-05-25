@@ -1,7 +1,0 @@
-Time Message
-1747137649.506 Motor 1 speed nominal.
-1747137654.505 Motor 1 speed nominal.
-1747137659.497 Approaching waypoint.
-1747137664.496 Approaching waypoint.
-1747137669.507 Approaching waypoint.
-1747137674.550 Current heading: 199.2

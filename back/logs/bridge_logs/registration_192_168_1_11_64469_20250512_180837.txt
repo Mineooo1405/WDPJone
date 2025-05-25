@@ -1,1 +1,0 @@
-1747048154.381 {"type": "registration", "robot_id": "robot1", "original_id_field": "unknown_id_in_payload", "timestamp": 1747048154.3808491, "robot_ip": "192.168.1.11", "robot_alias": "robot1"}

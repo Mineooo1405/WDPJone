@@ -1,4 +1,0 @@
-1747166513.317 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166513.31686, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Path clear.", "level": "DEBUG"}}
-1747166518.362 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166518.3624816, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Path clear.", "level": "WARN"}}
-1747166523.357 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166523.3567452, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Motor 1 speed nominal.", "level": "INFO"}}
-1747166528.412 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166528.4118016, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Path clear.", "level": "WARN"}}

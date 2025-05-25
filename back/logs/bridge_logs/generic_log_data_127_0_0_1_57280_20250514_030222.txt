@@ -1,5 +1,0 @@
-1747166560.615 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166560.615098, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Approaching waypoint.", "level": "ERROR"}}
-1747166565.611 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166565.6108773, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Obstacle detected.", "level": "DEBUG"}}
-1747166570.666 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166570.6660178, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Approaching waypoint.", "level": "DEBUG"}}
-1747166575.675 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166575.6749885, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Path clear.", "level": "INFO"}}
-1747166580.669 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166580.6685514, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Approaching waypoint.", "level": "DEBUG"}}

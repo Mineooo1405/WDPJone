@@ -1,5 +1,0 @@
-1747166437.129 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166437.1285744, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Obstacle detected.", "level": "DEBUG"}}
-1747166442.237 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166442.2366729, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Path clear.", "level": "DEBUG"}}
-1747166447.286 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166447.2859144, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Obstacle detected.", "level": "WARN"}}
-1747166452.337 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166452.3371356, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Battery level low.", "level": "INFO"}}
-1747166457.396 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747166457.395799, "type": "generic_log_data", "data": {"type": "log_data", "id": "sim_robot_test_01", "message": "Current heading: 147.7", "level": "ERROR"}}

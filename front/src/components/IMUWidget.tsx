@@ -518,7 +518,11 @@ const IMUWidget: React.FC = () => {
     },
   };
 
-  const formatAngleDeg = (rad: number = 0) => `${(rad * 180 / Math.PI).toFixed(1)}°`;
+  const formatAngleDeg = (rad: number = 0) => {
+    let deg = rad * 180 / Math.PI;
+    deg = ((deg + 180) % 360 + 360) % 360 - 180; // normalize to [-180, 180]
+    return `${deg.toFixed(1)}°`;
+  };
 
   // Determine connection status text for WidgetConnectionHeader
   let derivedStatusText: string;

@@ -1,1 +1,0 @@
-1747134818.731 {"type": "registration", "robot_id": "robot_simulator_01", "capabilities": ["imu", "encoder", "log"], "timestamp": 1747134818.730727, "robot_ip": "127.0.0.1", "robot_alias": "robot1", "original_id_field": "robot_id", "original_id_value": "robot_simulator_01"}

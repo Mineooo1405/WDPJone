@@ -1,6 +1,0 @@
-Time Message
-1747137058.567 Current heading: 22.3
-1747137063.561 Approaching waypoint.
-1747137068.562 Current heading: 323.2
-1747137073.588 Current heading: 121.5
-1747137078.587 Battery level low.

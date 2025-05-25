@@ -1,4 +1,0 @@
-Time Message
-1747135290.096 Approaching waypoint.
-1747135295.198 Obstacle detected.
-1747135300.263 Motor 1 speed nominal.

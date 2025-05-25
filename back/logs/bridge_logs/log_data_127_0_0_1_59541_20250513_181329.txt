@@ -1,7 +1,0 @@
-Time Message
-1747134818.854 Approaching waypoint.
-1747134823.904 Obstacle detected.
-1747134828.953 Battery level low.
-1747134833.996 Motor 1 speed nominal.
-1747134839.100 Path clear.
-1747134844.210 Current heading: 118.3

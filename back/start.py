@@ -192,18 +192,33 @@ def start_servers(stop_event_ref):
     
     threads = []
 
-    project_root = Path(__file__).resolve().parent
-    backend_dir = project_root / "back"
-    frontend_dir = project_root / "front"
+    # Xác định đường dẫn một cách tường minh
+    script_file_path = Path(__file__)
+    resolved_script_path = script_file_path.resolve()
+    # current_script_dir là thư mục 'back' (ví dụ: d:\ProjectOne-main\back)
+    current_script_dir = resolved_script_path.parent
+    
+    backend_dir = current_script_dir 
+    # project_root_dir là thư mục cha của current_script_dir (ví dụ: d:\ProjectOne-main)
+    project_root_dir = current_script_dir.parent 
+    # frontend_dir là thư mục 'front' bên trong project_root_dir (ví dụ: d:\ProjectOne-main\front)
+    frontend_dir = project_root_dir / "front"
+
+    # Gỡ lỗi: In ra kiểu và giá trị của các biến đường dẫn
+    # Bạn sẽ thấy output này trong GUI, có thể ở phần Backend Output
+    output_queue.put(("System-DEBUG", f"Type of backend_dir: {type(backend_dir)}, Value: {backend_dir}"))
+    output_queue.put(("System-DEBUG", f"Type of frontend_dir: {type(frontend_dir)}, Value: {frontend_dir}"))
 
     if not backend_dir.is_dir():
-        output_queue.put(("System-ERR", f"Backend directory not found at {backend_dir}"))
+        output_queue.put(("System-ERR", f"Backend directory not found at {backend_dir} or it's not a directory."))
         return
     if not frontend_dir.is_dir():
-        output_queue.put(("System-ERR", f"Frontend directory not found at {frontend_dir}"))
+        output_queue.put(("System-ERR", f"Frontend directory not found at {frontend_dir} or it's not a directory."))
         return
 
     check_and_create_frontend_env(frontend_dir)
+
+    output_queue.put(("System", "Starting backend server (direct_bridge.py)..."))
 
     output_queue.put(("System", "Starting backend server (direct_bridge.py)..."))
     backend_process = run_command_gui("python direct_bridge.py", cwd=backend_dir)

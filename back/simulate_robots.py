@@ -5,6 +5,7 @@ import random
 import threading
 import select
 import sys
+import math
 
 def send_message(sock, data):
     message = json.dumps(data) + "\n"  # Ensure newline character
@@ -273,27 +274,25 @@ def robot_client(robot_id, firmware_mode=False):
             last_imu_send = time.time()
             last_log_send = time.time()
             # Target frequencies
-            encoder_interval = 10  # 50Hz (every 20ms)
-            imu_interval = 10      # 20Hz (every 50ms)
+            encoder_interval = 10 # 50Hz (every 20ms)
+            imu_interval = 1     # 20Hz (every 50ms)
             log_interval = 10
             
             while not data_stop_event.is_set():
                 current_time = time.time()
-                
-                # Gửi encoder, IMU data qua data_sock (OTA1)
+
+                # Send encoder data
                 if current_time - last_encoder_send >= encoder_interval:
                     encoder_data = {
-                        "id": robot_id,  # Đổi từ robot_id thành id
-                        "type": "encoder",
-                        "data": [
-                            random.uniform(-30, 30),  # rpm1
-                            random.uniform(-30, 30),  # rpm2
-                            random.uniform(-30, 30)   # rpm3
-                        ]
+                        "type": "encoder", 
+                        "id": robot_id, 
+                        "timestamp": time.time(), 
+                        "data": [random.uniform(10, 50) for _ in range(3)] # Simulate 3 motor RPMs
                     }
                     send_message(data_sock, encoder_data)
                     last_encoder_send = current_time
-                
+
+                # Send IMU data
                 if current_time - last_imu_send >= imu_interval:
                     imu_data = {
                         "id": robot_id,  # Đổi từ robot_id thành id
@@ -306,28 +305,23 @@ def robot_client(robot_id, firmware_mode=False):
                                 random.uniform(-3.14, 3.14)   # yaw
                             ],
                             "quaternion": [
-                                1.0,  # qw
-                                0.0,  # qx
-                                0.0,  # qy
-                                0.0   # qz
+                                random.uniform(-3.14, 3.14),  # qw
+                                random.uniform(-3.14, 3.14),  # qx
+                                random.uniform(-3.14, 3.14),  # qy
+                                random.uniform(-3.14, 3.14)   # qz
                             ]
                         }
                     }
                     send_message(data_sock, imu_data)
                     last_imu_send = current_time
                 
+                # Send log message (less frequently)
                 if current_time - last_log_send >= log_interval:
-                    log_data = {
-                        "id": robot_id,  # Đổi từ robot_id thành id
-                        "type": "log",
-                        "message": f"Hehe from {robot_id}",
-                        
-                    }
-                    send_message(data_sock, log_data)
-                    last_log_send = current_time 
-                
-                # Sleep a short time to avoid CPU spinning
-                time.sleep(0.001)
+                    log_message = {"type": "log", "id": robot_id, "timestamp": time.time(), "message": f"Simulated log from {robot_id}"}
+                    send_message(data_sock, log_message)
+                    last_log_send = current_time
+
+                time.sleep(0.01) # Short sleep to prevent busy-waiting
                 
         except KeyboardInterrupt:
             print(f"{robot_id}: Closing connection...")

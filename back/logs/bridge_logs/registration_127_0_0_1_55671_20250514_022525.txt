@@ -1,1 +1,0 @@
-1747164349.164 {"robot_ip": "127.0.0.1", "robot_alias": "robot1", "timestamp": 1747164349.1637275, "type": "registration", "data": {"capabilities": ["imu_data", "encoder_data", "log_data"], "robot_reported_id": "sim_robot_test_01"}, "robot_reported_id_explicit": "sim_robot_test_01"}

@@ -6,7 +6,6 @@ from aiohttp import payload_type
 import websockets
 import json
 import logging
-import base64
 from connection_manager import ConnectionManager 
 import time
 from datetime import datetime
@@ -14,9 +13,13 @@ import argparse
 import math
 import re
 from dotenv import load_dotenv
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
+
+# --- Global Trajectory Calculator ---
+trajectory_calculator = None # Will be initialized in main
 
 # --- Configuration from Environment Variables with Fallbacks ---
 TCP_PORT_DEFAULT = 12346
@@ -68,145 +71,129 @@ async def broadcast_to_all_ui(message_payload):
 # --- TrajectoryCalculator class ---
 class TrajectoryCalculator: 
     def __init__(self):
-        self.robot_positions = {} # Keyed by unique_robot_key (ip:port)
-        self.robot_trajectories = {} # Keyed by unique_robot_key (ip:port)
-        self.last_update = {} # Keyed by unique_robot_key (ip:port)
-        # Load from environment or use default
-        self.max_points = int(os.environ.get("MAX_TRAJECTORY_POINTS", MAX_TRAJECTORY_POINTS_DEFAULT))
-        self.wheel_radius = float(os.environ.get("WHEEL_RADIUS", WHEEL_RADIUS_DEFAULT))
-        self.L = float(os.environ.get("ROBOT_BASE_DISTANCE_L", ROBOT_BASE_DISTANCE_L_DEFAULT))
-    
-    def update_from_encoder_imu(self, unique_robot_key, encoder_data, imu_data): # Changed robot_id to unique_robot_key
-        if unique_robot_key not in self.robot_positions:
-            self.robot_positions[unique_robot_key] = {"x": 0, "y": 0, "theta": 0}
-            self.robot_trajectories[unique_robot_key] = {
-                "x": [0], "y": [0], "theta": [0],
-                "timestamps": [time.time()]
+        self.robot_data = {}  # Keyed by unique_robot_key (ip:port)
+        # Each entry: {"x": 0.0, "y": 0.0, "theta": 0.0, "last_timestamp_encoder": None, "path_history": [], "latest_imu_data": None}
+
+    def _ensure_robot_data(self, unique_robot_key):
+        if unique_robot_key not in self.robot_data:
+            self.robot_data[unique_robot_key] = {
+                "x": 0.0, "y": 0.0, "theta": 0.0,
+                "last_timestamp_encoder": None,
+                "path_history": [{"x": 0.0, "y": 0.0, "theta": 0.0}], # Start with origin
+                "latest_imu_data": None
             }
-            self.last_update[unique_robot_key] = time.time()
-        
-        rpm = [encoder_data.get("rpm1", 0), 
-               encoder_data.get("rpm2", 0), 
-               encoder_data.get("rpm3", 0)]
-        
-        imu_actual_data = imu_data.get("data", {})
-        euler_angles = imu_actual_data.get("euler", [0,0,0]) 
-        theta = euler_angles[2] # yaw là phần tử thứ 3 sau khi transform_robot_message
-        
-        current_time = time.time()
-        dt = current_time - self.last_update[unique_robot_key]
-        if dt <= 0: 
-            dt = 1e-3 
-        self.last_update[unique_robot_key] = current_time
-        
-        # wheel_radius and L are now instance variables
-        
-        omega1 = rpm[0] * (2 * math.pi / 60)
-        omega2 = rpm[1] * (2 * math.pi / 60)
-        omega3 = rpm[2] * (2 * math.pi / 60)
 
-        v_wheel1 = omega1 * self.wheel_radius
-        v_wheel2 = omega2 * self.wheel_radius
-        v_wheel3 = omega3 * self.wheel_radius
-                
-        # Assuming L is self.L (distance from center to wheel)
-        # The kinematic model might need adjustment if L definition changes
-        vx_robot = (2*v_wheel1 - v_wheel2 - v_wheel3) / 3 
-        vy_robot = (math.sqrt(3)*v_wheel2 - math.sqrt(3)*v_wheel3) / 3 
+    def update_imu_data(self, unique_robot_key, imu_data):
+        self._ensure_robot_data(unique_robot_key)
+        # Assuming imu_data contains {"timestamp": ..., "yaw": ..., ...} or {"euler": [r,p,y], ...}
+        # Store the necessary parts, e.g., yaw and timestamp
+        self.robot_data[unique_robot_key]["latest_imu_data"] = imu_data
+        # logger.debug(f"Updated IMU for {unique_robot_key}: {imu_data.get('timestamp')}")
 
-        pos = self.robot_positions[unique_robot_key]
-        
-        # Chuyển đổi vận tốc từ hệ robot sang hệ thế giới
-        # theta là góc của robot so với hệ thế giới (yaw từ IMU)
-        # Tuy nhiên, pos["theta"] là góc tích lũy từ odometry trước đó.
-        # Để nhất quán, nếu dùng yaw từ IMU trực tiếp, thì pos["theta"] nên được cập nhật bằng yaw từ IMU.
-        # Nếu IMU cung cấp yaw tuyệt đối, thì dùng nó. Nếu không, odometry sẽ bị trôi.
-        # Giả định theta từ IMU là yaw tuyệt đối (đã được transform đúng)
-        
-        # Tính toán delta x, y trong hệ robot
-        dx_robot = vx_robot * dt
-        dy_robot = vy_robot * dt
-        
-        # Chuyển delta x, y từ hệ robot sang hệ thế giới sử dụng góc hiện tại của robot
-        # Góc này nên là góc đã được cập nhật từ IMU ở bước trước nếu có thể
-        current_orientation = pos["theta"] # Sử dụng góc hiện tại của robot để tính toán
-        
-        dx_world = dx_robot * math.cos(current_orientation) - dy_robot * math.sin(current_orientation)
-        dy_world = dx_robot * math.sin(current_orientation) + dy_robot * math.cos(current_orientation)
-        
-        pos["x"] += dx_world
-        pos["y"] += dy_world
-        pos["theta"] = theta
 
-        traj = self.robot_trajectories[unique_robot_key]
-        traj["x"].append(pos["x"])
-        traj["y"].append(pos["y"])
-        traj["theta"].append(pos["theta"])
-        traj["timestamps"].append(current_time)
+    def _rpm_to_omega(self, rpm):
+        return rpm * (2 * math.pi) / 60.0
+
+    def update_encoder_data(self, unique_robot_key, encoder_data):
+        self._ensure_robot_data(unique_robot_key)
+        robot_state = self.robot_data[unique_robot_key]
+
+        imu_data = robot_state["latest_imu_data"]
+        if not imu_data:
+            # logger.warning(f"No IMU data for {unique_robot_key} to calculate trajectory with encoder data.")
+            return None, None
+
+        # Extract data (adjust keys as per actual incoming data structure)
+        # Assuming encoder_data = {"encoders": [rpm1, rpm2, rpm3], "timestamp": float_seconds}
+        # Assuming imu_data = {"yaw": float_radians, "timestamp": float_seconds} or {"euler": [r,p,y_rad]}
         
-        # Use self.max_points
-        if len(traj["x"]) > self.max_points:
-            traj["x"] = traj["x"][-self.max_points:]
-            traj["y"] = traj["y"][-self.max_points:]
-            traj["theta"] = traj["theta"][-self.max_points:]
-            traj["timestamps"] = traj["timestamps"][-self.max_points:]
+        try:
+            rpms = encoder_data.get("encoders") # Expected: list of 3 RPMs
+            timestamp_encoder = encoder_data.get("timestamp")
+
+            if rpms is None or timestamp_encoder is None or len(rpms) < 3:
+                # logger.error(f"Invalid encoder data for {unique_robot_key}: {encoder_data}")
+                return None, None
+
+            current_heading_rad = imu_data.get("yaw") 
+            if current_heading_rad is None and "euler" in imu_data and isinstance(imu_data["euler"], list) and len(imu_data["euler"]) == 3:
+                 current_heading_rad = imu_data["euler"][2] # Yaw from euler angles
+            
+            if current_heading_rad is None:
+                # logger.error(f"Invalid IMU data (no yaw/euler) for {unique_robot_key}: {imu_data}")
+                return None, None
+
+        except Exception as e:
+            # logger.error(f"Error extracting data for trajectory calculation for {unique_robot_key}: {e}")
+            return None, None
+
+        if robot_state["last_timestamp_encoder"] is None:
+            robot_state["last_timestamp_encoder"] = timestamp_encoder
+            # logger.info(f"Initialized first timestamp for {unique_robot_key}")
+            # Update current pose with initial IMU heading
+            robot_state["theta"] = current_heading_rad
+            robot_state["path_history"] = [{"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}]
+            return {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}, list(robot_state["path_history"])
+
+
+        dt = timestamp_encoder - robot_state["last_timestamp_encoder"]
+        if dt <= 0: # Avoid division by zero or backward time
+            # logger.warning(f"dt <= 0 for {unique_robot_key}. Current: {timestamp_encoder}, Last: {robot_state['last_timestamp_encoder']}")
+            # Update last_timestamp_encoder to prevent getting stuck if timestamps are messy
+            robot_state["last_timestamp_encoder"] = timestamp_encoder
+            return None, None # Or return current state without change
+
+        robot_state["last_timestamp_encoder"] = timestamp_encoder
+
+        omega_m1, omega_m2, omega_m3 = [self._rpm_to_omega(rpm) for rpm in rpms]
+
+        # Kinematics model from PlotQuyDao.py (adjust if necessary)
+        # vx_robot = WHEEL_RADIUS_DEFAULT / 3.0 * (-omega_m1 + 0.5 * omega_m2 + 0.5 * omega_m3)
+        # vy_robot = WHEEL_RADIUS_DEFAULT / 3.0 * ( (math.sqrt(3)/2.0) * omega_m2 - (math.sqrt(3)/2.0) * omega_m3)
+        # Simpler model for testing (assuming direct relation, adjust as per your robot)
+        # This is a placeholder, replace with your robot's actual forward kinematics
+        vx_robot = WHEEL_RADIUS_DEFAULT * (omega_m1 + omega_m2 + omega_m3) / 3.0 # Simplistic average
+        vy_robot = 0 # Assuming no sideways movement from this simple model
+
+        # Transform robot frame velocities to world frame
+        cos_h = math.cos(robot_state["theta"]) # Use previous theta for rotation of velocity vector
+        sin_h = math.sin(robot_state["theta"])
+
+        vx_world = vx_robot * cos_h - vy_robot * sin_h
+        vy_world = vx_robot * sin_h + vy_robot * cos_h
+
+        # Update position
+        robot_state["x"] += vx_world * dt
+        robot_state["y"] += vy_world * dt
+        robot_state["theta"] = current_heading_rad # Update heading from IMU directly
+
+        new_point = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+        robot_state["path_history"].append(new_point)
+
+        if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
+            robot_state["path_history"].pop(0)
         
-        return pos, traj
-    
-    def get_trajectory(self, unique_robot_key, limit=None): # Changed robot_id to unique_robot_key
-        if unique_robot_key not in self.robot_trajectories:
-            return None
-        traj = self.robot_trajectories[unique_robot_key]
-        if limit and limit < len(traj["x"]):
-            return {
-                "x": traj["x"][-limit:], "y": traj["y"][-limit:],
-                "theta": traj["theta"][-limit:], "timestamps": traj["timestamps"][-limit:]
-            }
-        return traj
-    
-    def get_position(self, unique_robot_key): # Changed robot_id to unique_robot_key
-        return self.robot_positions.get(unique_robot_key)
+        current_pose = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+        # logger.debug(f"New pose for {unique_robot_key}: {current_pose}, path length: {len(robot_state['path_history'])}")
+        return current_pose, list(robot_state["path_history"]) # Return a copy
 
 # --- broadcast_to_subscribers, calculate_distance, DataLogger (như cũ, DataLogger uses unique_robot_key) ---
-async def broadcast_to_subscribers(data_type, message): 
-    robot_ip_in_message = message.get("robot_ip")
-    # If broadcasting available_robot_update, robot_ip might not be in the top-level message payload
-    # It's inside message["robot"]["ip"]
-    if data_type == "available_robot_update": # Special handling for this new type
-        # This message type is intended for all UI clients, not specific robot subscribers.
-        # The broadcast_to_all_ui function should be used instead for these.
-        # However, if we are to use this function, we'd need a way to target all.
-        # For now, this path won't be hit if we use broadcast_to_all_ui for available_robot_update
-        pass # Let broadcast_to_all_ui handle this.
-    
-    elif not robot_ip_in_message: # For other data types, robot_ip is expected
-        # logger.warning(f"broadcast_to_subscribers: robot_ip missing in message for data_type {data_type}. Message: {message}")
-        return
-
-    if data_type in subscribers and robot_ip_in_message in subscribers[data_type]:
-        for ws in list(subscribers[data_type][robot_ip_in_message]): 
-            try:
-                await ws.send(json.dumps(message))
-            except Exception as e:
-                logger.error(f"Error sending to subscriber for {data_type}/{robot_ip_in_message}: {e}")
-                # Safe removal
-                if ws in subscribers[data_type].get(robot_ip_in_message, set()): # Check existence before removal
-                    subscribers[data_type][robot_ip_in_message].remove(ws)
-                if not subscribers[data_type].get(robot_ip_in_message): # Check before del
-                    if robot_ip_in_message in subscribers[data_type]:
-                        del subscribers[data_type][robot_ip_in_message]
-                if not subscribers[data_type]:
-                    del subscribers[data_type]
-
-def calculate_distance(x_points, y_points): 
-    if not x_points or not y_points or len(x_points) != len(y_points) or len(x_points) < 2:
-        return 0.0
-    total_distance = 0.0
-    for i in range(1, len(x_points)):
-        dx = x_points[i] - x_points[i-1]
-        dy = y_points[i] - x_points[i-1] # Đã sửa
-        total_distance += math.sqrt(dx*dx + dy*dy)
-    return total_distance
+async def broadcast_to_subscribers(data_type, robot_alias, message_payload): # Added robot_alias
+    # ... (rest of the function needs to be adapted if it's generic)
+    # For trajectory, we'll broadcast specifically
+    # logger.debug(f"Attempting to broadcast for {data_type} and robot {robot_alias}")
+    if data_type in subscribers and robot_alias in subscribers[data_type]:
+        message_json = json.dumps(message_payload)
+        # logger.debug(f"Broadcasting to {len(subscribers[data_type][robot_alias])} subscribers for {robot_alias}: {message_json}")
+        tasks = [ws.send_str(message_json) for ws in subscribers[data_type][robot_alias]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                # logger.error(f"Error broadcasting to subscriber for {robot_alias}: {result}")
+                # Optionally remove problematic subscriber
+                pass # Pass for now
+    # else:
+        # logger.debug(f"No subscribers for {data_type} and robot {robot_alias}")
 
 # DataLogger will use unique_robot_key (ip:port) for its internal file management
 # The `robot_id` argument to DataLogger methods will be this unique_robot_key
@@ -797,50 +784,74 @@ class DirectBridge:
                     # Trajectory calculation logic (ensure _latest_encoder_data and _latest_imu_data are initialized in __init__)
                     # This part now relies on the transformed_message structure
                     msg_type = transformed_message.get("type")
-                    if msg_type == "encoder_data": 
-                        self._latest_encoder_data[unique_robot_key] = transformed_message # Store the whole transformed payload
-                    elif msg_type == "imu_data": 
-                        self._latest_imu_data[unique_robot_key] = transformed_message # Store the whole transformed payload
-
-                    if unique_robot_key in self._latest_encoder_data and unique_robot_key in self._latest_imu_data:
-                        current_time_calc = time.time()
-                        # Make sure to access the actual data payload for calculations
-                        enc_payload = self._latest_encoder_data[unique_robot_key] 
-                        imu_payload = self._latest_imu_data[unique_robot_key]
+                    if msg_type == "encoder_data":
+                        # transformed_message for encoder_data is:
+                        # {"type": "encoder_data", "robot_ip": ..., "robot_alias": ..., "timestamp": ..., "data": [rpm1, rpm2, rpm3]}
                         
-                        # Check timestamps if they are critical for freshness
-                        # Assuming enc_payload and imu_payload have top-level "timestamp"
-                        if abs(enc_payload.get("timestamp", 0) - current_time_calc) < 1.5 and abs(imu_payload.get("timestamp", 0) - current_time_calc) < 1.5:
-                                
-                                # Pass the correct data structures to update_from_encoder_imu
-                                # update_from_encoder_imu expects encoder_data with rpmX and imu_data with data.euler
-                                # Our transformed_message for encoder_data has 'data' as a list
-                                # Our transformed_message for imu_data has 'data' as a dict with euler, etc.
-                                
-                                # We might need to adjust what TrajectoryCalculator.update_from_encoder_imu expects
-                                # or adapt the data here. For now, let's assume TrajectoryCalculator
-                                # is adapted or can handle this structure (e.g. by accessing enc_payload['data'] for speeds)
-                                # The TrajectoryCalculator currently expects:
-                                # encoder_data.get("rpm1", 0) -> this needs enc_payload to be a dict { "rpm1": val, ...}
-                                # imu_data.get("data", {}).get("euler", [0,0,0]) -> this matches imu_payload['data']['euler']
+                        encoder_rpms_list = transformed_message.get("data")
+                        message_timestamp = transformed_message.get("timestamp")
 
-                                # Let's adjust the call to pass the 'data' part of the payload:
-                                position, _ = self.trajectory_calculator.update_from_encoder_imu(
-                                    unique_robot_key, 
-                                    enc_payload, # Pass the whole transformed encoder payload
-                                    imu_payload  # Pass the whole transformed IMU payload
-                                )
-                                position_update = {
-                                "type": "position_update", 
-                                "robot_ip": robot_ip_address, 
-                                "robot_alias": current_alias, 
-                                "position": position, 
-                                "timestamp": time.time()
+                        if encoder_rpms_list is not None and message_timestamp is not None and isinstance(encoder_rpms_list, list) and len(encoder_rpms_list) >= 3:
+                            # Prepare payload for TrajectoryCalculator
+                            payload_for_calculator = {
+                                "encoders": encoder_rpms_list,
+                                "timestamp": message_timestamp
                             }
-                        # Log and broadcast position_update
-                        self.data_logger.log_data(unique_robot_key, "position_update", position_update)
-                        await self.broadcast_to_subscribers(current_alias, position_update)
+                            
+                            # Prepare payload for DataLogger (expects rpm_1, rpm_2, rpm_3 keys)
+                            log_payload_encoder = {
+                                "timestamp": message_timestamp,
+                                "robot_ip": robot_ip_address,
+                                "robot_alias": current_alias,
+                                "rpm_1": encoder_rpms_list[0],
+                                "rpm_2": encoder_rpms_list[1],
+                                "rpm_3": encoder_rpms_list[2],
+                            }
+                            self.data_logger.log_data(unique_robot_key, "encoder_data", log_payload_encoder)
+
+                            # Ensure IMU data is up-to-date in the calculator before processing encoder data
+                            if unique_robot_key in self._latest_imu_data:
+                                self.trajectory_calculator.update_imu_data(unique_robot_key, self._latest_imu_data[unique_robot_key])
+                            # else:
+                                # logger.debug(f"No fresh IMU data for {unique_robot_key} when processing encoder data. Calculator will use its last known IMU state.")
+
+                            current_pose, path_history = self.trajectory_calculator.update_encoder_data(
+                                unique_robot_key,       # String key: "ip:port"
+                                payload_for_calculator  # Dict: {"encoders": [...], "timestamp": ...}
+                            )
+
+                            if current_pose and path_history:
+                                trajectory_payload = {
+                                    "type": "realtime_trajectory", # For TrajectoryWidget subscription
+                                    "robot_ip": robot_ip_address,
+                                    "robot_alias": current_alias,
+                                    "position": current_pose, # {"x": ..., "y": ..., "theta": ...}
+                                    "path": path_history,     # [{"x": ..., "y": ..., "theta": ...}, ...]
+                                    "timestamp": time.time()  # Timestamp of this trajectory update event
+                                }
+                                
+                                # Log the position update part of the trajectory
+                                log_pos_update_for_data_logger = {
+                                    "timestamp": trajectory_payload["timestamp"],
+                                    "position": trajectory_payload["position"],
+                                    "robot_ip": robot_ip_address,
+                                    "robot_alias": current_alias
+                                }
+                                self.data_logger.log_data(unique_robot_key, "position_update", log_pos_update_for_data_logger)
+                                
+                                await self.broadcast_to_subscribers(current_alias, trajectory_payload)
+                        else:
+                            logger.warning(f"Invalid or incomplete encoder_data in transformed_message from {current_alias} (needs 'data' as list >=3, and 'timestamp'): {transformed_message}")
                         
+                    elif msg_type == "imu_data": 
+                        # transformed_message for imu_data is:
+                        # {"type": "imu_data", "robot_ip": ..., "robot_alias": ..., "timestamp": ..., "data": {"time":..., "euler":..., "quaternion":...}}
+                        self._latest_imu_data[unique_robot_key] = transformed_message # Store the whole transformed payload
+                        
+                        # Update IMU data in the trajectory calculator immediately
+                        self.trajectory_calculator.update_imu_data(unique_robot_key, transformed_message)
+                        # logger.debug(f"IMU data for {unique_robot_key} (ts: {transformed_message.get(\\"timestamp\\")}) updated in TrajectoryCalculator.")
+
                 except json.JSONDecodeError:
                     logger.error(f"Invalid JSON from {current_alias} ({robot_ip_address}) (Control): {raw_data_str}")
                 except Exception as e_proc_loop:
@@ -863,8 +874,7 @@ class DirectBridge:
                     alias_being_removed = robot_alias_manager["ip_port_to_alias"][unique_robot_key]
                     del robot_alias_manager["ip_port_to_alias"][unique_robot_key]
                     if robot_alias_manager.get("alias_to_ip_port", {}).get(alias_being_removed) == unique_robot_key:
-                        if alias_being_removed in robot_alias_manager["alias_to_ip_port"]:
-                             del robot_alias_manager["alias_to_ip_port"][alias_being_removed]
+                         del robot_alias_manager["alias_to_ip_port"][alias_being_removed]
                     
                     if robot_alias_manager.get("ip_to_alias", {}).get(robot_ip_address) == alias_being_removed:
                         if robot_ip_address in robot_alias_manager["ip_to_alias"]:
@@ -1119,6 +1129,70 @@ class DirectBridge:
                                 "robot_alias": target_alias
                             }))
 
+                    elif command == "subscribe": # Handle the specific command from TrajectoryWidget
+                        data_type_to_sub = payload.get("type") 
+                        target_alias = payload.get("robot_alias") # TrajectoryWidget uses robot_alias
+
+                        if not data_type_to_sub:
+                            logger.warning(f"WS ({ws_identifier}): 'subscribe' command missing 'type'. Payload: {payload}")
+                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'type' (data_type) for subscription"}))
+                            continue
+                        if not target_alias:
+                            logger.warning(f"WS ({ws_identifier}): 'subscribe' command missing 'robot_alias'. Payload: {payload}")
+                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'robot_alias' for subscription"}))
+                            continue
+                        
+                        # For 'subscribe', the entity key is the robot_alias
+                        actual_subscription_entity_key = target_alias
+                        display_target = target_alias
+                        
+                        # Verify alias exists
+                        async with robot_alias_manager["lock"]:
+                            if target_alias not in robot_alias_manager["alias_to_ip_port"]:
+                                logger.warning(f"WS ({ws_identifier}): 'subscribe' command for unknown alias '{target_alias}'. Payload: {payload}")
+                                await websocket.send(json.dumps({"type": "error", "command": command, "message": f"Unknown robot_alias '{target_alias}' for subscription."}))
+                                continue
+
+                        async with self.subscribers_lock:
+                            if client_addr not in self.websocket_subscriptions:
+                                self.websocket_subscriptions[client_addr] = {}
+                            if actual_subscription_entity_key not in self.websocket_subscriptions[client_addr]:
+                                self.websocket_subscriptions[client_addr][actual_subscription_entity_key] = set()
+                            self.websocket_subscriptions[client_addr][actual_subscription_entity_key].add(data_type_to_sub)
+                        
+                        logger.info(f"{ws_identifier} subscribed to '{data_type_to_sub}' for '{display_target}' (Key: {actual_subscription_entity_key}) using 'subscribe' command.")
+                        await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_sub, "subscribed_key": actual_subscription_entity_key, "robot_alias": target_alias}))
+
+                    elif command == "unsubscribe": # Handle the specific command from TrajectoryWidget
+                        data_type_to_unsub = payload.get("type")
+                        target_alias = payload.get("robot_alias") # TrajectoryWidget uses robot_alias
+
+                        if not data_type_to_unsub:
+                            logger.warning(f"WS ({ws_identifier}): 'unsubscribe' command missing 'type'. Payload: {payload}")
+                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'type' (data_type) for unsubscription"}))
+                            continue
+                        if not target_alias:
+                            logger.warning(f"WS ({ws_identifier}): 'unsubscribe' command missing 'robot_alias'. Payload: {payload}")
+                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'robot_alias' for unsubscription"}))
+                            continue
+                        
+                        unsubscription_entity_key = target_alias
+                        display_target = target_alias
+
+                        async with self.subscribers_lock:
+                            if client_addr in self.websocket_subscriptions and \
+                               unsubscription_entity_key in self.websocket_subscriptions[client_addr]:
+                                self.websocket_subscriptions[client_addr][unsubscription_entity_key].discard(data_type_to_unsub)
+                                if not self.websocket_subscriptions[client_addr][unsubscription_entity_key]: # If set is empty
+                                    del self.websocket_subscriptions[client_addr][unsubscription_entity_key]
+                                if not self.websocket_subscriptions[client_addr]: # If dict for client_addr is empty
+                                    del self.websocket_subscriptions[client_addr]
+                                logger.info(f"{ws_identifier} unsubscribed from '{data_type_to_unsub}' for '{display_target}' (Key: {unsubscription_entity_key}) using 'unsubscribe' command.")
+                                await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_unsub, "unsubscribed_key": unsubscription_entity_key, "robot_alias": target_alias}))
+                            else:
+                                logger.info(f"{ws_identifier} attempted to unsubscribe from '{data_type_to_unsub}' for '{display_target}' but no active subscription found.")
+                                await websocket.send(json.dumps({"type": "ack", "command": command, "status": "not_subscribed", "data_type": data_type_to_unsub, "robot_alias": target_alias}))
+                    
                     elif command == "direct_subscribe":
                         data_type_to_sub = payload.get("type") # This 'type' is the data_type like 'imu_data'
                         target_ip = payload.get("robot_ip")

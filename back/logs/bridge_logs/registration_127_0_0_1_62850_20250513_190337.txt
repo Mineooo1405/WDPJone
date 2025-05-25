@@ -1,1 +1,0 @@
-1747137822.557 {"type": "registration", "robot_id": "robot1", "capabilities": ["imu", "encoder", "log"], "timestamp": 1747137822.5571039, "robot_ip": "127.0.0.1", "robot_alias": "robot1", "original_id_field": "robot_id", "original_id_value": "robot1"}
