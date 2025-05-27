@@ -1,3 +1,5 @@
+WEB DASHBOARD
+
 python version in used 3.12.4 64bit
 
 Step 1: install frontend 
