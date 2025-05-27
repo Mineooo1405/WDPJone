@@ -269,13 +269,13 @@ def robot_client(robot_id, firmware_mode=False):
         
         # Main loop - send data periodically
         try:
-            # Keep track of last send times to maintain stable frequency
+
             last_encoder_send = time.time()
             last_imu_send = time.time()
             last_log_send = time.time()
-            # Target frequencies
-            encoder_interval = 1 # 50Hz (every 20ms)
-            imu_interval = 1     # 20Hz (every 50ms)
+
+            encoder_interval = 1 
+            imu_interval = 1     
             log_interval = 1
             
             while not data_stop_event.is_set():

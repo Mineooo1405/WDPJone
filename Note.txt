@@ -1,18 +1,26 @@
-python 3.12.4 64bit
-pip install fastapi uvicorn pyodbc websocket
-pip install sqlalchemy psycopg2
-pip install alembic
-nhớ cài odbc driver 18
-username: sa / pass: 123456
+python version in used 3.12.4 64bit
 
-lệnh chạy fastapi uvicorn main:app --reload(lệnh này dùng để reload theo thời gian thực) --host <address> --port <port>
+Step 1: install frontend 
+    for linux: sudo apt install nodejs npm
+    cd ./front
+    npm start
 
-để chạy front-end thì phải cd iot-dashboard rồi dùng npm start
+Step 2: install python libraries
+    $ "path to python3.12.4" -m venv .venv
+    source ".env/bin/activate"
+    pip install -r requirements.txt
 
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+Step 3: run project
+    cd ./back
+    python start.py
+    click start all 
 
-pip install python-dotenv
+Step 4: test with simulate data
+    cd ./back
+    python simulate_robots.py
+    json package frequency can be set in these variables
+            encoder_interval 
+            imu_interval     
+            log_interval 
+    
 
-cd back
-python test_data_sender.py --type bno055 --file "../json_data/imu_data_20250328_101150.json" --robot robot1 --delay 0.05
-python test_data_sender.py --type encoder --file "../json_data/encoder_data_20250328_101150.json" --robot robot1 --delay 0.05
