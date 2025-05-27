@@ -12,11 +12,11 @@
     "iot-dashboard": "file:",
     "lucide-react": "^0.479.0",
     "my-app": "file:",
-    "react": "^19.0.0",
+    "react": "^18.3.1",
     "react-chartjs-2": "^5.3.0",
     "react-dnd": "^16.0.1",
     "react-dnd-html5-backend": "^16.0.1",
-    "react-dom": "^19.0.0",
+    "react-dom": "^18.3.1",
     "react-router-dom": "^7.3.0",
     "react-scripts": "^5.0.1",
     "react-use-websocket": "^4.13.0",
@@ -25,7 +25,7 @@
     "utility-types": "^3.11.0"
   },
   "scripts": {
-    "start": "set NODE_OPTIONS=--openssl-legacy-provider && react-scripts start",
+    "start": "FAST_REFRESH=false NODE_OPTIONS=--openssl-legacy-provider react-scripts start",
     "build": "set NODE_OPTIONS=--openssl-legacy-provider && react-scripts build",
     "test": "set NODE_OPTIONS=--openssl-legacy-provider && react-scripts test",
     "eject": "react-scripts eject",
@@ -34,7 +34,10 @@
     "start:edge": "BROWSER=msedge react-scripts start"
   },
   "eslintConfig": {
-    "extends": []
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
   },
   "browserslist": {
     "production": [
@@ -51,8 +54,8 @@
   "devDependencies": {
     "@eslint/js": "^9.21.0",
     "@tailwindcss/postcss": "^4.0.9",
-    "@types/react": "^19.0.10",
-    "@types/react-dom": "^19.0.4",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
     "@types/recharts": "^1.8.29",
     "@types/uuid": "^10.0.0",
     "@typescript-eslint/eslint-plugin": "^8.26.1",

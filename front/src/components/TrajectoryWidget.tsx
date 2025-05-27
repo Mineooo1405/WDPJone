@@ -35,7 +35,7 @@ const TrajectoryWidget: React.FC = () => {
   const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
   const { firmwareUpdateMode } = useContext(GlobalAppContext);
 
-  const chartRef = useRef<ChartJS<'scatter', TrajectoryPoint[], unknown> | null>(null);
+  const chartRef = useRef<ChartJS<'line', TrajectoryPoint[], unknown> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [currentPath, setCurrentPath] = useState<TrajectoryPoint[]>([]);
@@ -198,17 +198,19 @@ const TrajectoryWidget: React.FC = () => {
       chartRef.current.update('none'); // 'none' for no animation, 'quiet' might also work
     } else {
       chartRef.current = new ChartJS(ctx, {
-        type: 'scatter', // Using scatter for X-Y plotting
+        type: 'line', // Changed from 'scatter' to 'line'
         data: {
           datasets: [
             {
               label: 'Robot Path',
               data: currentPath,
-              borderColor: 'rgb(54, 162, 235)',
-              backgroundColor: 'rgba(54, 162, 235, 0.5)',
-              showLine: true, // Draw lines between points
-              pointRadius: 2,
-              tension: 0.1, // Slight curve to the line
+              borderColor: 'rgb(54, 162, 235)', // Color of the line
+              fill: false, // Do not fill the area under the line
+              borderWidth: 2, // Thickness of the line
+              pointRadius: 2, // Size of the points
+              pointBackgroundColor: 'rgb(54, 162, 235)', // Color of the points
+              tension: 0.1, // Slight curve to the line (0 for straight lines)
+              // showLine: true, // Implicitly true for type: 'line', can be omitted
             },
             // {
             //   label: 'Current Pose',
@@ -272,7 +274,7 @@ const TrajectoryWidget: React.FC = () => {
             },
           },
           // Ensure aspect ratio is equal for a proper trajectory map
-          aspectRatio: 1, // This might need to be handled by controlling canvas size or a plugin
+          aspectRatio: 1, 
         },
       });
     }
@@ -286,12 +288,32 @@ const TrajectoryWidget: React.FC = () => {
 
   const resetZoom = () => chartRef.current?.resetZoom();
   const clearPath = () => {
-    setCurrentPath([]);
-    setCurrentPose(null);
-    if (chartRef.current) {
-        chartRef.current.data.datasets[0].data = [];
-        // chartRef.current.data.datasets[1].data = [];
-        chartRef.current.update();
+    if (selectedRobotId && readyState === WebSocket.OPEN) {
+      // Send a command to the backend to clear its trajectory history
+      sendJsonMessage({
+        command: "clear_trajectory", // New command type
+        robot_alias: selectedRobotId,
+      });
+      
+      // Optimistically clear the frontend state as well.
+      // The backend should ideally confirm or send an empty path shortly.
+      setCurrentPath([]);
+      setCurrentPose(null);
+      if (chartRef.current) {
+          chartRef.current.data.datasets[0].data = [];
+          // chartRef.current.data.datasets[1].data = []; // For current pose if used
+          chartRef.current.update('none'); // Update chart with no animation
+      }
+    } else {
+      // Fallback for local clear if WS not ready or no robot selected
+      // (though button should ideally be disabled in these cases)
+      setCurrentPath([]);
+      setCurrentPose(null);
+      if (chartRef.current) {
+          chartRef.current.data.datasets[0].data = [];
+          chartRef.current.update('none');
+      }
+      console.warn("[TrajectoryWidget] Clear path attempted locally (WS not open or no robot selected).");
     }
   };
 

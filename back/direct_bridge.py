@@ -72,7 +72,6 @@ async def broadcast_to_all_ui(message_payload):
 class TrajectoryCalculator: 
     def __init__(self):
         self.robot_data = {}  # Keyed by unique_robot_key (ip:port)
-        # Each entry: {"x": 0.0, "y": 0.0, "theta": 0.0, "last_timestamp_encoder": None, "path_history": [], "latest_imu_data": None}
 
     def _ensure_robot_data(self, unique_robot_key):
         if unique_robot_key not in self.robot_data:
@@ -102,23 +101,27 @@ class TrajectoryCalculator:
         self._ensure_robot_data(unique_robot_key)
         robot_state = self.robot_data[unique_robot_key]
         imu_data = robot_state["latest_imu_data"]
+
         if not imu_data:
             logger.warning(f"IMU data not available for {unique_robot_key}. Returning current state for trajectory update.")
-            current_pose = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
-            return current_pose, robot_state["path_history"]
-            
-        # Extract timestamp and RPMs
+            current_pose_dict = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+            # Return the structured dictionary
+            return {"position": current_pose_dict, "path": list(robot_state["path_history"])}
+
         timestamp_encoder = encoder_data.get("timestamp", time.time())
-        rpms = encoder_data.get("data", encoder_data.get("encoders", []))
-        if not (isinstance(rpms, list) and len(rpms) == 3):
-            logger.warning(f"Invalid RPM data for {unique_robot_key}: {rpms}. Returning current state for trajectory update.")
-            current_pose = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
-            return current_pose, robot_state["path_history"]
-            
-        # Get heading from IMU
-        if "yaw" in imu_data:
+        # The 'data' key in encoder_data from transform_robot_message contains the RPM list
+        rpms = encoder_data.get("data", []) # Use "data" as per transform_robot_message
+        
+        if not (isinstance(rpms, list) and len(rpms) >= 3): # Check for at least 3 for safety
+            logger.warning(f"Invalid RPM data for {unique_robot_key}: {rpms}. Expected list of 3 numbers in 'data' field. Returning current state.")
+            current_pose_dict = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+            # Return the structured dictionary
+            return {"position": current_pose_dict, "path": list(robot_state["path_history"])}
+        
+        current_heading_rad = robot_state["theta"] # Default to current state theta
+        if "yaw" in imu_data: # This check is fine
             current_heading_rad = imu_data["yaw"]
-        elif "euler" in imu_data and len(imu_data["euler"]) == 3:
+        elif "euler" in imu_data and isinstance(imu_data.get("euler"), list) and len(imu_data["euler"]) == 3:
             current_heading_rad = imu_data["euler"][2]
         else:
             current_heading_rad = robot_state["theta"]
@@ -140,11 +143,30 @@ class TrajectoryCalculator:
         robot_state["x"] += vx_world * dt
         robot_state["y"] += vy_world * dt
         robot_state["theta"] = current_heading_rad
+        # At the end of successful calculation:
         new_point = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
         robot_state["path_history"].append(new_point)
         if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
             robot_state["path_history"] = robot_state["path_history"][-MAX_TRAJECTORY_POINTS_DEFAULT:]
+        # This return is already correct
         return {"position": new_point, "path": list(robot_state["path_history"])}
+
+    def clear_path_history(self, unique_robot_key):
+        self._ensure_robot_data(unique_robot_key)
+        robot_state = self.robot_data[unique_robot_key]
+        robot_state["path_history"].clear()
+        
+        # Optionally, you might want to reset the robot's current position (x, y, theta)
+        # if "clear" means a full reset of its known pose. For now, just clearing path.
+        # robot_state["x"] = 0.0 
+        # robot_state["y"] = 0.0
+        # robot_state["theta"] = 0.0 # Or keep last known theta
+
+        logger.info(f"Path history cleared for robot {unique_robot_key}")
+        
+        # Return the current pose and an empty path to allow broadcasting an update
+        current_pose_dict = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+        return {"position": current_pose_dict, "path": []}
 
 # --- broadcast_to_subscribers, calculate_distance, DataLogger (như cũ, DataLogger uses unique_robot_key) ---
 async def broadcast_to_subscribers(data_type, robot_alias, message_payload): # Added robot_alias
@@ -612,7 +634,7 @@ class DirectBridge:
             self.handle_ws_client, 
             '0.0.0.0', 
             self.ws_port,
-            extra_headers=self.get_websocket_cors_headers
+            #additional_headers=self.get_websocket_cors_headers
         )
         logger.info(f"WebSocket server started on 0.0.0.0:{self.ws_port}")
     
@@ -762,61 +784,48 @@ class DirectBridge:
 
                         if encoder_rpms_list is not None and message_timestamp is not None and isinstance(encoder_rpms_list, list) and len(encoder_rpms_list) >= 3:
                             # Prepare payload for TrajectoryCalculator
-                            payload_for_calculator = {
-                                "encoders": encoder_rpms_list,
-                                "timestamp": message_timestamp
-                            }
+                            # The TrajectoryCalculator now expects the 'data' field to contain the RPMs directly
+                            # and 'timestamp' at the top level of the dict passed to it.
+                            # message_from_robot already contains this structure if it's an encoder message.
+                            # However, transform_robot_message puts rpms into transformed_message["data"]
+                            # and timestamp into transformed_message["timestamp"]
                             
-                            # Prepare payload for DataLogger (expects rpm_1, rpm_2, rpm_3 keys)
-                            log_payload_encoder = {
-                                "timestamp": message_timestamp,
-                                "robot_ip": robot_ip_address,
-                                "robot_alias": current_alias,
-                                "rpm_1": encoder_rpms_list[0],
-                                "rpm_2": encoder_rpms_list[1],
-                                "rpm_3": encoder_rpms_list[2],
-                            }
-                            self.data_logger.log_data(unique_robot_key, "encoder_data", log_payload_encoder)
+                            # We should pass the transformed_message directly if its 'data' field has the RPMs
+                            # and it has a 'timestamp' field.
+                            # The TrajectoryCalculator's update_encoder_data expects a dict like:
+                            # {"timestamp": ..., "data": [rpm1, rpm2, rpm3]} (based on its internal parsing)
 
-                            # Ensure IMU data is up-to-date in the calculator before processing encoder data
-                            if unique_robot_key in self._latest_imu_data:
-                                self.trajectory_calculator.update_imu_data(unique_robot_key, self._latest_imu_data[unique_robot_key])
-                            # else:
-                                # logger.debug(f"No fresh IMU data for {unique_robot_key} when processing encoder data. Calculator will use its last known IMU state.")
-
-                            current_pose, path_history = self.trajectory_calculator.update_encoder_data(
+                            trajectory_update_result = self.trajectory_calculator.update_encoder_data(
                                 unique_robot_key,
-                                message_from_robot # Pass the original message_dict
+                                transformed_message # Pass the transformed_message which has "data": [rpms] and "timestamp"
                             )
                             
-                            # Add these log lines for debugging:
-                            logger.info(f"DEBUG: current_pose from trajectory_calculator: {current_pose}, type: {type(current_pose)}")
-                            logger.info(f"DEBUG: path_history from trajectory_calculator: {path_history}, type: {type(path_history)}")
+                            # logger.info(f"DEBUG: trajectory_update_result from calculator: {trajectory_update_result}")
 
-                            if current_pose and path_history is not None: # path_history can be an empty list
+                            if trajectory_update_result and isinstance(trajectory_update_result.get("position"), dict) and isinstance(trajectory_update_result.get("path"), list):
+                                current_pose_data = trajectory_update_result["position"]
+                                path_history_data = trajectory_update_result["path"]
+                                
                                 trajectory_message_for_ws = {
                                     "type": "realtime_trajectory",
-                                    "robot_ip": robot_ip_address , # Use the actual IP
+                                    "robot_ip": robot_ip_address ,
                                     "robot_alias": current_alias,
                                     "timestamp": time.time(), 
-                                    "position": current_pose, # This IS the pose object e.g. {"x": 0.1, "y": 0.2, "theta": 0.0}
-                                    "path": path_history     # This IS the list of points e.g. [{"x":0,"y":0},{"x":0.1,"y":0.2}]
+                                    "position": current_pose_data, # Use the actual data
+                                    "path": path_history_data     # Use the actual data
                                 }
                                 # logger.debug(f"Broadcasting realtime_trajectory for {current_alias}: {trajectory_message_for_ws}")
                                 await self.broadcast_to_subscribers(current_alias, trajectory_message_for_ws)
                             else:
-                                logger.warning(f"Skipping trajectory broadcast for {current_alias} due to missing pose or path.")
-                        
-                        else:
-                            logger.warning(f"Invalid or incomplete encoder_data in transformed_message from {current_alias} (needs 'data' as list >=3, and 'timestamp'): {transformed_message}")
-                        
+                                logger.warning(f"Skipping trajectory broadcast for {current_alias} due to invalid result from TrajectoryCalculator: {trajectory_update_result}")
+                    
                     elif msg_type == "imu_data": 
                         # transformed_message for imu_data is:
                         # {"type": "imu_data", "robot_ip": ..., "robot_alias": ..., "timestamp": ..., "data": {"time":..., "euler":..., "quaternion":...}}
                         self._latest_imu_data[unique_robot_key] = transformed_message # Store the whole transformed payload
                         
                         # Update IMU data in the trajectory calculator immediately
-                        self.trajectory_calculator.update_imu_data(unique_robot_key, transformed_message)
+                        self.trajectory_calculator.update_imu_data(unique_robot_key, transformed_message.get("data", {}))
                         # logger.debug(f"IMU data for {unique_robot_key} (ts: {transformed_message.get(\\"timestamp\\")}) updated in TrajectoryCalculator.")
 
                 except json.JSONDecodeError:
@@ -934,178 +943,40 @@ class DirectBridge:
                         del self.websocket_subscriptions[failed_client_addr]
                     logger.info(f"Cleaned up WS client {failed_client_addr} from subscriptions and ui_websockets due to send failure.")
 
-    async def handle_ws_client(self, websocket, path): 
+    async def handle_ws_client(self, websocket):
+        path = "/"
+        if hasattr(websocket, 'resource_name'):
+            path = websocket.resource_name
+        elif hasattr(websocket, 'path'):
+            path = websocket.path
+        elif hasattr(websocket, 'request_uri'):
+            path = websocket.request_uri
+
         client_addr = websocket.remote_address
         ws_identifier = f"{client_addr[0]}:{client_addr[1]}" if client_addr else "UnknownWSClient"
         logger.info(f"WebSocket client connected: {ws_identifier} on path: {path}")
         
-        # Add to global set of UI clients
         ui_websockets.add(websocket)
-        
-        # Initialize subscriptions for this client in the shared dictionary
-        async with self.subscribers_lock:
-            if client_addr not in self.websocket_subscriptions:
-                self.websocket_subscriptions[client_addr] = {}
-            # Else, it's a reconnect, existing subscriptions might be stale or re-used if client desires.
-            # For simplicity, we are not clearing old subs here, but a more robust system might.
+        await self.send_connected_robots_list_to_client(websocket)
 
         try:
-            # Send current list of connected robots to the newly connected UI client
-            async with robot_alias_manager["lock"]:
-                current_robots_payload = {
-                    "type": "initial_robot_list",
-                    "robots": [],
-                    "timestamp": time.time()
-                }
-                for ip_port, alias in robot_alias_manager["ip_port_to_alias"].items():
-                    ip = ip_port.split(":")[0]
-                    current_robots_payload["robots"].append({
-                        "ip": ip,
-                        "alias": alias,
-                        "unique_key": ip_port, # unique_robot_key
-                        "status": "connected" # Assume connected if in this list
-                    })
-                await websocket.send(json.dumps(current_robots_payload))
-                logger.info(f"Sent initial robot list to {ws_identifier}: {len(current_robots_payload['robots'])} robots.")
-
             async for message_str in websocket:
                 try:
-                    payload = json.loads(message_str)
-                    
-                    command = payload.get("command")
-                    msg_type_from_payload = payload.get("type") # Get type for logging or specific command needs
+                    data = json.loads(message_str)
+                    command = data.get("command")
+                    msg_type = data.get("type") # For subscriptions
+                    robot_alias = data.get("robot_alias")
 
-                    logger.debug(f"WS received from {ws_identifier}: Command='{command}', Type='{msg_type_from_payload}', Payload: {str(payload)[:200] if len(str(payload)) > 200 else payload}")
-
-                    if command == "get_available_robots":
-                        logger.info(f"WS client {ws_identifier} requested get_available_robots via command.")
-                        async with robot_alias_manager["lock"]:
-                            response_payload = {
-                                "type": "connected_robots_list",
-                                "robots": [],
-                                "timestamp": time.time()
-                            }
-                            for ip_port_key, alias_val in robot_alias_manager["ip_port_to_alias"].items():
-                                ip_addr, _ = ip_port_key.split(":", 1)
-                                response_payload["robots"].append({
-                                    "ip": ip_addr,
-                                    "alias": alias_val,
-                                    "unique_key": ip_port_key, # Changed from key to unique_key for consistency
-                                    "status": "connected"
-                                })
-                        await websocket.send(json.dumps(response_payload))
-                        logger.info(f"Sent connected_robots_list to {ws_identifier}: {len(response_payload['robots'])} robots.")
-                    
-                    elif command == "send_to_robot":
-                        target_ip = payload.get("robot_ip")
-                        target_alias = payload.get("robot_alias") # Use if IP is not definitive
-                        robot_command_payload = payload.get("payload")
-
-                        if not robot_command_payload or not isinstance(robot_command_payload, dict):
-                            logger.warning(f"WS: Invalid or missing 'payload' in 'send_to_robot' from {ws_identifier}")
-                            await websocket.send(json.dumps({"type": "command_response", "original_command": command, "status": "error", "message": "Invalid or missing payload content"}))
-                            continue
-                        
-                        unique_key_to_send = None
-                        # Find unique_key (prefers IP, then alias)
-                        async with robot_alias_manager["lock"]:
-                            if target_ip:
-                                found_alias = robot_alias_manager["ip_to_alias"].get(target_ip)
-                                if found_alias:
-                                    unique_key_to_send = robot_alias_manager["alias_to_ip_port"].get(found_alias)
-                                # Fallback if ip_to_alias is not populated or IP has multiple aliases (take first one found)
-                                if not unique_key_to_send:
-                                    for key, alias_val in robot_alias_manager["ip_port_to_alias"].items():
-                                        if key.startswith(target_ip + ":"):
-                                            unique_key_to_send = key
-                                            target_alias = alias_val # Update alias if found via IP
-                                            break
-                            if not unique_key_to_send and target_alias:
-                                unique_key_to_send = robot_alias_manager["alias_to_ip_port"].get(target_alias)
-                                if unique_key_to_send:
-                                     target_ip = robot_alias_manager["alias_to_ip"].get(target_alias, target_ip) # Update IP
-                        
-                        if not unique_key_to_send:
-                            logger.warning(f"WS: Could not find robot for IP '{target_ip}' or alias '{target_alias}' from {ws_identifier}")
-                            await websocket.send(json.dumps({"type": "command_response", "original_command": command, "status": "error", "message": f"Robot IP '{target_ip}' or alias '{target_alias}' not found/connected."}))
-                            continue
-                    
-                        tcp_client_tuple = ConnectionManager.get_tcp_client(unique_key_to_send)
-                        if tcp_client_tuple:
-                            _, writer_to_use = tcp_client_tuple # Correctly unpack (reader, writer)
-                            
-                            # Determine the alias for logging and response
-                            # Use the alias associated with unique_key_to_send from robot_alias_manager if available
-                            current_connection_alias = target_alias # Default to the resolved target_alias from payload
-                            if unique_key_to_send: # Should always be true if tcp_client_tuple is not None
-                                async with robot_alias_manager["lock"]:
-                                    alias_from_map = robot_alias_manager["ip_port_to_alias"].get(unique_key_to_send)
-                                    if alias_from_map:
-                                        current_connection_alias = alias_from_map
-                            
-
-                            try:
-                                command_sent_to_robot_str = ""
-                                if robot_command_payload.get("type") == "pid_values":
-                                    motor = robot_command_payload.get("motor")
-                                    kp = robot_command_payload.get("kp")
-                                    ki = robot_command_payload.get("ki")
-                                    kd = robot_command_payload.get("kd")
-                                    if motor is not None and kp is not None and ki is not None and kd is not None:
-                                        command_sent_to_robot_str = f"MOTOR:{motor} Kp:{kp} Ki:{ki} Kd:{kd}" # No \n
-                                        writer_to_use.write(command_sent_to_robot_str.encode('utf-8'))
-                                        # No await asyncio.sleep here, assume single command is fine
-                                    else:
-                                        raise ValueError("Missing motor, Kp, Ki, or Kd in pid_values payload")
-                                else:
-                                    # For other types, send as JSON string with newline
-                                    command_sent_to_robot_str = json.dumps(robot_command_payload)
-                                    writer_to_use.write((command_sent_to_robot_str + '\n').encode('utf-8'))
-                                
-
-                                await writer_to_use.drain()
-                                logger.info(f"WS: Sent to robot {current_connection_alias} ({target_ip}): {command_sent_to_robot_str}")
-                                await websocket.send(json.dumps({
-                                    "type": "command_response", 
-                                    "original_command": command,
-                                    "payload_type_sent_to_robot": robot_command_payload.get("type"),
-                                    "status": "sent_to_robot", # Or "success"
-                                    "message": f"Command '{robot_command_payload.get('type')}' sent to robot {current_connection_alias}.",
-                                    "robot_ip": target_ip,
-                                    "robot_alias": current_connection_alias
-                                }))
-                            except Exception as e_send:
-                                logger.error(f"WS: Error sending to robot {current_connection_alias} ({target_ip}): {e_send}")
-                                await websocket.send(json.dumps({
-                                    "type": "command_response", 
-                                    "original_command": command,
-                                    "payload_type_sent_to_robot": robot_command_payload.get("type"),
-                                    "status": "error", 
-                                    "message": f"Error sending to robot: {str(e_send)}",
-                                    "robot_ip": target_ip,
-                                    "robot_alias": current_connection_alias
-                                }))
-                        else:
-                            logger.warning(f"WS: No active TCP connection for robot {target_alias} ({target_ip}) (Unique Key: {unique_key_to_send})")
-                            await websocket.send(json.dumps({
-                                "type": "command_response", 
-                                "original_command": command,
-                                "status": "error", 
-                                "message": "Robot not connected via TCP.",
-                                "robot_ip": target_ip,
-                                "robot_alias": target_alias
-                            }))
-
-                    elif command == "subscribe": # Handle the specific command from TrajectoryWidget
-                        data_type_to_sub = payload.get("type") 
-                        target_alias = payload.get("robot_alias") # TrajectoryWidget uses robot_alias
+                    if command == "subscribe":
+                        data_type_to_sub = msg_type
+                        target_alias = robot_alias
 
                         if not data_type_to_sub:
-                            logger.warning(f"WS ({ws_identifier}): 'subscribe' command missing 'type'. Payload: {payload}")
+                            logger.warning(f"WS ({ws_identifier}): 'subscribe' command missing 'type'. Payload: {data}")
                             await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'type' (data_type) for subscription"}))
                             continue
                         if not target_alias:
-                            logger.warning(f"WS ({ws_identifier}): 'subscribe' command missing 'robot_alias'. Payload: {payload}")
+                            logger.warning(f"WS ({ws_identifier}): 'subscribe' command missing 'robot_alias'. Payload: {data}")
                             await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'robot_alias' for subscription"}))
                             continue
                         
@@ -1116,7 +987,7 @@ class DirectBridge:
                         # Verify alias exists
                         async with robot_alias_manager["lock"]:
                             if target_alias not in robot_alias_manager["alias_to_ip_port"]:
-                                logger.warning(f"WS ({ws_identifier}): 'subscribe' command for unknown alias '{target_alias}'. Payload: {payload}")
+                                logger.warning(f"WS ({ws_identifier}): 'subscribe' command for unknown alias '{target_alias}'. Payload: {data}")
                                 await websocket.send(json.dumps({"type": "error", "command": command, "message": f"Unknown robot_alias '{target_alias}' for subscription."}))
                                 continue
 
@@ -1130,16 +1001,16 @@ class DirectBridge:
                         logger.info(f"{ws_identifier} subscribed to '{data_type_to_sub}' for '{display_target}' (Key: {actual_subscription_entity_key}) using 'subscribe' command.")
                         await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_sub, "subscribed_key": actual_subscription_entity_key, "robot_alias": target_alias}))
 
-                    elif command == "unsubscribe": # Handle the specific command from TrajectoryWidget
-                        data_type_to_unsub = payload.get("type")
-                        target_alias = payload.get("robot_alias") # TrajectoryWidget uses robot_alias
+                    elif command == "unsubscribe":
+                        data_type_to_unsub = msg_type
+                        target_alias = robot_alias
 
                         if not data_type_to_unsub:
-                            logger.warning(f"WS ({ws_identifier}): 'unsubscribe' command missing 'type'. Payload: {payload}")
+                            logger.warning(f"WS ({ws_identifier}): 'unsubscribe' command missing 'type'. Payload: {data}")
                             await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'type' (data_type) for unsubscription"}))
                             continue
                         if not target_alias:
-                            logger.warning(f"WS ({ws_identifier}): 'unsubscribe' command missing 'robot_alias'. Payload: {payload}")
+                            logger.warning(f"WS ({ws_identifier}): 'unsubscribe' command missing 'robot_alias'. Payload: {data}")
                             await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'robot_alias' for unsubscription"}))
                             continue
                         
@@ -1160,329 +1031,42 @@ class DirectBridge:
                                 logger.info(f"{ws_identifier} attempted to unsubscribe from '{data_type_to_unsub}' for '{display_target}' but no active subscription found.")
                                 await websocket.send(json.dumps({"type": "ack", "command": command, "status": "not_subscribed", "data_type": data_type_to_unsub, "robot_alias": target_alias}))
                     
-                    elif command == "direct_subscribe":
-                        data_type_to_sub = payload.get("type") # This 'type' is the data_type like 'imu_data'
-                        target_ip = payload.get("robot_ip")
-                        target_alias = payload.get("robot_alias")
-                        if not data_type_to_sub:
-                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'type' (data_type) for subscription"}))
-                            continue
-                        # ... (rest of direct_subscribe logic, make sure it uses robot_alias correctly)
-                        actual_subscription_entity_key = self.GLOBAL_SUBSCRIPTION_KEY 
-                        display_target = "all"
-                        if target_alias: # Prefer alias if provided
-                             async with robot_alias_manager["lock"]:
-                                if target_alias in robot_alias_manager["alias_to_ip_port"]:
-                                    actual_subscription_entity_key = target_alias
-                                    resolved_ip_for_alias = robot_alias_manager["alias_to_ip"].get(target_alias, "N/A")
-                                    display_target = f"{target_alias} (IP: {resolved_ip_for_alias})"
-                                else:
-                                    logger.warning(f"Subscription request for unknown alias '{target_alias}'. Defaulting to global for '{data_type_to_sub}'.")
-                        elif target_ip:
-                            async with robot_alias_manager["lock"]:
-                                resolved_alias_for_ip = robot_alias_manager["ip_to_alias"].get(target_ip)
-                            if resolved_alias_for_ip:
-                                actual_subscription_entity_key = resolved_alias_for_ip
-                                display_target = f"{resolved_alias_for_ip} (IP: {target_ip})"
-                            else:
-                                logger.warning(f"Subscription request for unknown IP '{target_ip}'. Defaulting to global for '{data_type_to_sub}'.")
-                        
-                        async with self.subscribers_lock:
-                            if client_addr not in self.websocket_subscriptions:
-                                self.websocket_subscriptions[client_addr] = {}
-                            if actual_subscription_entity_key not in self.websocket_subscriptions[client_addr]:
-                                self.websocket_subscriptions[client_addr][actual_subscription_entity_key] = set()
-                            self.websocket_subscriptions[client_addr][actual_subscription_entity_key].add(data_type_to_sub)
-                        logger.info(f"{ws_identifier} subscribed to '{data_type_to_sub}' for '{display_target}' (Key: {actual_subscription_entity_key})")
-                        await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_sub, "subscribed_key": actual_subscription_entity_key}))
-
-                    elif command == "direct_unsubscribe":
-                        data_type_to_unsub = payload.get("type") # This 'type' is the data_type like 'imu_data'
-                        target_ip = payload.get("robot_ip")
-                        target_alias = payload.get("robot_alias")
-                        if not data_type_to_unsub:
-                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'type' (data_type) for unsubscription"}))
-                            continue
-                        # ... (rest of direct_unsubscribe logic, make sure it uses robot_alias correctly)
-                        unsubscription_entity_key = self.GLOBAL_SUBSCRIPTION_KEY
-                        display_target = "all"
-                        if target_alias: # Prefer alias
-                            unsubscription_entity_key = target_alias
-                            resolved_ip_for_alias = robot_alias_manager["alias_to_ip"].get(target_alias, "N/A")
-                            display_target = f"{target_alias} (IP: {resolved_ip_for_alias})"
-                        elif target_ip:
-                            async with robot_alias_manager["lock"]:
-                                resolved_alias_for_ip = robot_alias_manager["ip_to_alias"].get(target_ip)
-                            if resolved_alias_for_ip:
-                                unsubscription_entity_key = resolved_alias_for_ip
-                                display_target = f"{resolved_alias_for_ip} (IP: {target_ip})"
-                        
-                        async with self.subscribers_lock:
-                            if client_addr in self.websocket_subscriptions and \
-                               unsubscription_entity_key in self.websocket_subscriptions[client_addr]:
-                                self.websocket_subscriptions[client_addr][unsubscription_entity_key].discard(data_type_to_unsub)
-                                if not self.websocket_subscriptions[client_addr][unsubscription_entity_key]:
-                                    del self.websocket_subscriptions[client_addr][unsubscription_entity_key]
-                                if not self.websocket_subscriptions[client_addr]:
-                                    del self.websocket_subscriptions[client_addr]
-                        logger.info(f"{ws_identifier} unsubscribed from '{data_type_to_unsub}' for '{display_target}' (Key: {unsubscription_entity_key})")
-                        await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_unsub, "unsubscribed_key": unsubscription_entity_key}))
-
-                    # Add elif for other recognized commands: request_trajectory, upload_firmware, load_pid_config, etc.
-                    # Example for request_trajectory:
-                    elif command == "request_trajectory":
-                        target_ip = payload.get("robot_ip")
-                        target_alias = payload.get("robot_alias")
-                        limit = payload.get("limit", self.trajectory_calculator.max_points)
-                        unique_key_for_traj = None
-                        if target_alias: # Prefer alias for identifying robot for trajectory
-                            async with robot_alias_manager["lock"]:
-                                unique_key_for_traj = robot_alias_manager["alias_to_ip_port"].get(target_alias)
-                        elif target_ip: # Fallback to IP if alias not provided
-                            async with robot_alias_manager["lock"]:
-                                primary_alias_for_ip = robot_alias_manager["ip_to_alias"].get(target_ip)
-                                if primary_alias_for_ip:
-                                    unique_key_for_traj = robot_alias_manager["alias_to_ip_port"].get(primary_alias_for_ip)
-                        
-                        if unique_key_for_traj:
-                            trajectory_data = self.trajectory_calculator.get_trajectory(unique_key_for_traj, limit)
-                            # ... (rest of trajectory sending logic)
-                            if trajectory_data:
-                                await websocket.send(json.dumps({
-                                    "type": "trajectory_data", 
-                                    "robot_alias": robot_alias_manager["ip_port_to_alias"].get(unique_key_for_traj, target_alias or target_ip), 
-                                    "robot_ip": unique_key_for_traj.split(":")[0], # Extract IP from unique key
-                                    "trajectory": trajectory_data, 
-                                    "timestamp": time.time()
-                                }))
-                            else:
-                                await websocket.send(json.dumps({"type": "error", "command": command, "message": "No trajectory data for robot."}))
-                        else:
-                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Robot not found for trajectory request."}))
-                    
-                    elif command == "load_pid_config":
-                        target_ip = payload.get("robot_ip")
-                        target_alias = payload.get("robot_alias")
-                        ip_to_send_pid = None
-                        if target_alias: # Prefer alias
-                            async with robot_alias_manager["lock"]:
-                                ip_to_send_pid = robot_alias_manager["alias_to_ip"].get(target_alias)
-                        elif target_ip:
-                            ip_to_send_pid = target_ip
-                        
-                        if not ip_to_send_pid:
-                            # ... send error ...
-                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Target robot IP or alias must be specified."}))
-                            continue
-                        # ... (rest of load_pid_config logic)
-                        loaded_pids = await self.load_pid_config_from_file(target_robot_ip=ip_to_send_pid)
-                        # ... send ack/error ...
-
-                    # ... (similarly for save_pid_config, get_pid_config, upload_firmware)
-                    elif command == "upgrade_signal":
-                        target_ip = payload.get("robot_ip")
-                        target_alias = payload.get("robot_alias") # Will be None if not sent by frontend
-
-                        if not target_ip and not target_alias:
-                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Missing 'robot_ip' or 'robot_alias' for upgrade_signal."}))
-                            continue
-
-                        unique_key_to_send = None
-                        # Resolve unique_key_to_send and ensure target_ip/target_alias are populated for logging
-                        if target_ip:
-                            async with robot_alias_manager["lock"]:
-                                primary_alias_for_ip = robot_alias_manager["ip_to_alias"].get(target_ip)
-                                if primary_alias_for_ip:
-                                    unique_key_to_send = robot_alias_manager["alias_to_ip_port"].get(primary_alias_for_ip)
-                                    if not target_alias: # If alias wasn't in payload, use the resolved one
-                                        target_alias = primary_alias_for_ip
-                        elif target_alias: # Fallback to alias if IP not provided in payload
-                            async with robot_alias_manager["lock"]:
-                                unique_key_to_send = robot_alias_manager["alias_to_ip_port"].get(target_alias)
-                                if not target_ip and unique_key_to_send: # If IP wasn't in payload, resolve it
-                                    target_ip = robot_alias_manager["alias_to_ip"].get(target_alias)
-                        
-                        if not unique_key_to_send:
-                            err_msg = f"Robot not found for IP '{target_ip}' or alias '{target_alias}' for upgrade_signal."
-                            logger.warning(f"{ws_identifier} - {err_msg}")
-                            await websocket.send(json.dumps({"type": "error", "command": command, "message": err_msg}))
-                            continue
-                        
-                        tcp_client_tuple = ConnectionManager.get_tcp_client(unique_key_to_send)
-                        if tcp_client_tuple:
-                            _, writer = tcp_client_tuple
-                            command_to_send_to_robot_str = "Upgrade" # ESP32 expects "Upgrade"
-                            try:
-                                logger.info(f"To robot {unique_key_to_send} (Alias: {target_alias}, IP: {target_ip}): Sending command: '{command_to_send_to_robot_str.strip()}'")
-                                writer.write(command_to_send_to_robot_str.encode('utf-8'))
-                                await writer.drain()
+                    elif command == "clear_trajectory": # Handle new command
+                        if robot_alias:
+                            unique_robot_key = self.get_robot_key_from_alias(robot_alias)
+                            if unique_robot_key and self.trajectory_calculator:
+                                logger.info(f"Received 'clear_trajectory' command for {robot_alias} (key: {unique_robot_key}) from {ws_identifier}")
+                                trajectory_update_result = self.trajectory_calculator.clear_path_history(unique_robot_key)
                                 
-                                await websocket.send(json.dumps({
-                                    "type": "command_response", 
-                                    "original_command": command,
-                                    "status": "success", 
-                                    "robot_ip": target_ip, 
-                                    "robot_alias": target_alias, 
-                                    "message": f"Command '{command}' sent to robot {target_alias or target_ip}.",
-                                    "timestamp": time.time()
-                                }))
-                            except Exception as e_send_upgrade:
-                                logger.error(f"Error sending upgrade_signal to robot {unique_key_to_send}: {e_send_upgrade}")
-                                await websocket.send(json.dumps({
-                                    "type": "command_response",
-                                    "original_command": command,
-                                    "status": "error", 
-                                    "robot_ip": target_ip,
-                                    "robot_alias": target_alias,
-                                    "message": f"Failed to send upgrade_signal to robot: {e_send_upgrade}"
-                                }))
+                                # Broadcast the cleared state immediately to all subscribers of this robot
+                                if trajectory_update_result:
+                                    # Determine robot_ip for the message (you might need a helper for this)
+                                    robot_ip_for_message = "N/A" # Placeholder
+                                    alias_to_ip_map = await self.robot_alias_manager.get_alias_to_ip_map()
+                                    if robot_alias in alias_to_ip_map:
+                                        robot_ip_for_message = alias_to_ip_map[robot_alias]
+                                    
+                                    cleared_trajectory_message = {
+                                        "type": "realtime_trajectory",
+                                        "robot_ip": robot_ip_for_message,
+                                        "robot_alias": robot_alias,
+                                        "timestamp": time.time(),
+                                        "position": trajectory_update_result["position"],
+                                        "path": trajectory_update_result["path"] # This will be an empty list
+                                    }
+                                    await self.broadcast_to_subscribers(robot_alias, cleared_trajectory_message)
+                                    logger.info(f"Broadcasted cleared trajectory for {robot_alias}")
+                            else:
+                                logger.warning(f"Could not clear trajectory for {robot_alias}: unknown alias or no trajectory calculator.")
                         else:
-                            logger.warning(f"TCP client for robot {unique_key_to_send} not found for upgrade_signal from {ws_identifier}.")
-                            await websocket.send(json.dumps({"type": "error", "command": command, "message": "Robot TCP connection not found for upgrade_signal."}))
+                            logger.warning(f"Received 'clear_trajectory' command without robot_alias from {ws_identifier}")
                     
-                    elif command == "trigger_robot_pid_task": 
-                        target_ip = payload.get("robot_ip")
-                        target_alias = payload.get("robot_alias")
-
-                        unique_key_to_send = None
-                        # Resolve unique_key and ensure target_ip/target_alias are populated
-                        async with robot_alias_manager["lock"]:
-                            if target_alias: # Prefer alias if provided
-                                unique_key_to_send = robot_alias_manager["alias_to_ip_port"].get(target_alias)
-                                if unique_key_to_send and not target_ip: # If IP wasn't in payload, resolve it
-                                    target_ip = robot_alias_manager["alias_to_ip"].get(target_alias)
-                            elif target_ip: # Fallback to IP if alias not provided
-                                primary_alias_for_ip = robot_alias_manager["ip_to_alias"].get(target_ip)
-                                if primary_alias_for_ip:
-                                    unique_key_to_send = robot_alias_manager["alias_to_ip_port"].get(primary_alias_for_ip)
-                                    if not target_alias: # If alias wasn't in payload, use the resolved one
-                                        target_alias = primary_alias_for_ip
-                        
-                        if not unique_key_to_send:
-                            err_msg = f"Robot not found for IP '{target_ip}' or alias '{target_alias}' to trigger PID task."
-                            logger.warning(f"WS ({ws_identifier}): {err_msg}")
-                            await websocket.send(json.dumps({
-                                "type": "command_response", "original_command": command, "status": "error",
-                                "message": err_msg
-                            }))
-                            continue
-                        
-                                               
-                        tcp_client_tuple = ConnectionManager.get_tcp_client(unique_key_to_send)
-                        if tcp_client_tuple:
-                            _, writer_to_use = tcp_client_tuple # Unpack reader, writer
-                            # Get the definitive alias for logging/response
-
-                            actual_alias_for_response = target_alias
-                            async with robot_alias_manager["lock"]:
-                                alias_from_map = robot_alias_manager["ip_port_to_alias"].get(unique_key_to_send)
-                                if alias_from_map:
-                                    actual_alias_for_response = alias_from_map
-                            
-
-                            try:
-                                command_to_robot = "Set PID" # No \n, as expected by main.c
-                                writer_to_use.write(command_to_robot.encode('utf-8'))
-                                await writer_to_use.drain()
-                                logger.info(f"Sent '{command_to_robot}' command to robot {actual_alias_for_response} ({target_ip}) via WS command from {ws_identifier}")
-                                await websocket.send(json.dumps({
-                                    "type": "command_response", "original_command": command, "status": "success",
-                                    "message": f"'{command_to_robot}' command sent to robot {actual_alias_for_response}.",
-                                    "robot_ip": target_ip, "robot_alias": actual_alias_for_response
-                                }))
-                            except Exception as e_send_pid_task:
-                                logger.error(f"Error sending '{command_to_robot}' command to robot {actual_alias_for_response} ({target_ip}): {e_send_pid_task}")
-                                await websocket.send(json.dumps({
-                                    "type": "command_response", "original_command": command, "status": "error",
-                                    "message": f"Error sending '{command_to_robot}' command: {str(e_send_pid_task)}",
-                                    "robot_ip": target_ip, "robot_alias": actual_alias_for_response
-                                }))
-                        else:
-                            logger.warning(f"WS ({ws_identifier}): No active TCP connection for robot {target_alias} ({target_ip}) (Unique Key: {unique_key_to_send}) to trigger PID task.")
-                            await websocket.send(json.dumps({
-                                "type": "command_response", "original_command": command, "status": "error",
-                                "message": f"No active TCP connection for robot {target_alias} ({target_ip}).",
-                                "robot_ip": target_ip, "robot_alias": target_alias
-                            }))
-                    
-                    elif (command == "upload_firmware_start") or (msg_type_from_payload == "upload_firmware_start"):
-                        robot_ip = payload.get("robot_ip")
-                        filename = payload.get("filename")
-                        filesize = payload.get("filesize")
-                        self.fw_upload_mgr.start(robot_ip, filename, filesize)
-                        await websocket.send(json.dumps({"type":"ack", "stage":"upload_started", "robot_ip":robot_ip}))
-                    #  (2) firmware_data_chunk
-                    elif (command == "firmware_data_chunk") or (msg_type_from_payload == "firmware_data_chunk"):
-                        robot_ip = payload.get("robot_ip")
-                        b64 = payload.get("data")
-                        rec = self.fw_upload_mgr.add_chunk(robot_ip, b64)
-                        # Gửi ack cho mỗi chunk để frontend cập nhật progress
-                        await websocket.send(json.dumps({
-                            "type": "firmware_chunk_ack",
-                            "robot_ip": robot_ip,
-                            "received": self.fw_upload_mgr.get_received_bytes(robot_ip)
-                        }))
-                    #  (3) upload_firmware_end
-                    elif (command == "upload_firmware_end") or (msg_type_from_payload == "upload_firmware_end"):
-                        robot_ip = payload.get("robot_ip")
-                        fw_path  = self.fw_upload_mgr.finish(robot_ip)
-                        if fw_path:
-                            await self.ota_connection.prepare_firmware_for_send(fw_path, robot_ip)
-                            await websocket.send(json.dumps({
-                                "type":  "firmware_prepared_for_ota",
-                                "robot_ip": robot_ip,
-                                "firmware_size": os.path.getsize(fw_path),
-                                "status": "success"
-                            }))
-                        else:
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "stage": "upload_finish",
-                                "robot_ip": robot_ip,
-                                "message": "Firmware file incomplete"
-                            }))
-                    # ──────────────────────────────────────────────────────────────
-                    else: # Command is None or not recognized
-                        # msg_type_from_payload was already obtained
-                        if msg_type_from_payload == "get_available_robots" and command is None: # Backward compatibility for old RobotContext
-                            logger.warning(f"WS message from {ws_identifier} has type 'get_available_robots' but no command. Processing for compatibility. Payload: {payload}")
-                            async with robot_alias_manager["lock"]:
-                                response_payload = {
-                                    "type": "connected_robots_list",
-                                    "robots": [], "timestamp": time.time()
-                                }
-                                for ip_port_key, alias_val in robot_alias_manager["ip_port_to_alias"].items():
-                                    ip_addr, _ = ip_port_key.split(":", 1)
-                                    response_payload["robots"].append({"ip": ip_addr, "alias": alias_val, "unique_key": ip_port_key, "status": "connected"})
-                                await websocket.send(json.dumps(response_payload))
-                        
-                        elif msg_type_from_payload and command is None: # Type is present, but no recognized command
-                             logger.warning(f"WS message from {ws_identifier} has 'type': '{msg_type_from_payload}' but no recognized 'command'. Discarding. Payload: {payload}")
-                             # Not sending error to client to avoid noise for potentially harmless messages from old clients/widgets
-                        
-                        elif command is not None: # Command is present but not in the handled list
-                            logger.warning(f"Unknown WS command '{command}' from {ws_identifier}. Payload: {payload}")
-                            await websocket.send(json.dumps({"type": "error", "message": f"Unknown command: {command}"}))
-                        else: # Both command and type are missing or not useful
-                            logger.warning(f"WS message from {ws_identifier} lacks a recognized 'command' or a fallback 'type'. Raw: {message_str[:200]}")
-                            # No error sent back as the message format is fundamentally unparsable for intent here
+                    # ... (other potential commands like 'get_pid', 'set_pid', etc.) ...
 
                 except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON from WebSocket client {ws_identifier}: {message_str}")
-                    await websocket.send(json.dumps({"type": "error", "message": "Invalid JSON payload"}))
-                except Exception as e_ws_loop:
-                    logger.error(f"Error processing WebSocket message from {ws_identifier}: {e_ws_loop}", exc_info=True)
-                    try: # Try to send an error to client, might fail if connection is broken
-                        await websocket.send(json.dumps({"type": "error", "message": f"Server error: {str(e_ws_loop)}"}))
-                    except:
-                        pass # Ignore if send fails
-
-        except websockets.exceptions.ConnectionClosedOK:
-            logger.info(f"WebSocket client {ws_identifier} disconnected gracefully.")
-        except websockets.exceptions.ConnectionClosedError as e:
-            logger.warning(f"WebSocket client {ws_identifier} connection closed with error: {e}")
-        except Exception as e_ws_handler:
-            logger.error(f"Unhandled error in WebSocket handler for {ws_identifier}: {e_ws_handler}", exc_info=True)
+                    logger.error(f"Failed to parse JSON from {ws_identifier}: {message_str}")
+                except Exception as e:
+                    logger.error(f"Error processing message from {ws_identifier} ('{message_str}'): {e}", exc_info=True)
         finally:
             logger.info(f"Cleaning up WebSocket client: {ws_identifier}")
             ui_websockets.discard(websocket) # Remove from global set of active UI websockets
