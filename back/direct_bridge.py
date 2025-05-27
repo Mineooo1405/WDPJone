@@ -502,6 +502,47 @@ class DirectBridge:
         self._latest_imu_data = {} # Initialize latest IMU data
         self.fw_upload_mgr = FirmwareUploadManager(self.temp_firmware_dir)
 
+    async def get_connected_robots_list(self):
+        """
+        Helper to get the current list of connected robots and their details.
+        """
+        robots_list = []
+        async with robot_alias_manager["lock"]:
+            for alias, ip_port_str in robot_alias_manager["alias_to_ip_port"].items():
+                # Assuming ip_port_str is "ip:port", we need to get just the IP for the list
+                # and confirm it's an active TCP connection.
+                conn_tuple = ConnectionManager.get_tcp_client(ip_port_str) # ip_port_str is the unique_key
+                if conn_tuple and conn_tuple.reader and not conn_tuple.reader.at_eof():
+                    ip_address = robot_alias_manager["alias_to_ip"].get(alias) # Get IP from alias_to_ip
+                    if not ip_address and ":" in ip_port_str: # Fallback if alias_to_ip somehow missed
+                        ip_address = ip_port_str.split(":")[0]
+                    
+                    robots_list.append({
+                        "alias": alias,
+                        "ip": ip_address if ip_address else "N/A",
+                        "unique_key": ip_port_str, # The ip:port string
+                        "status": "connected" # Or more detailed status if available
+                    })
+        return robots_list
+
+    async def send_connected_robots_list_to_client(self, websocket_client):
+        """
+        Sends the current list of connected robots to a specific WebSocket client.
+        """
+        try:
+            connected_robots = await self.get_connected_robots_list()
+            message_payload = {
+                "type": "available_robots_initial_list", # Or a more descriptive type
+                "robots": connected_robots,
+                "timestamp": time.time()
+            }
+            await websocket_client.send(json.dumps(message_payload))
+            logger.info(f"Sent initial list of {len(connected_robots)} connected robots to WS client {websocket_client.remote_address}")
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning(f"Failed to send initial robot list to {websocket_client.remote_address}: Connection closed.")
+        except Exception as e:
+            logger.error(f"Error sending initial robot list to {websocket_client.remote_address}: {e}", exc_info=True)
+
     def get_websocket_cors_headers(self, path: str, request_headers):
         # request_headers is of type websockets.datastructures.Headers
         # Default frontend origin for Vite dev environment
@@ -957,7 +998,7 @@ class DirectBridge:
         logger.info(f"WebSocket client connected: {ws_identifier} on path: {path}")
         
         ui_websockets.add(websocket)
-        await self.send_connected_robots_list_to_client(websocket)
+        await self.send_connected_robots_list_to_client(websocket) # This line will now work
 
         try:
             async for message_str in websocket:

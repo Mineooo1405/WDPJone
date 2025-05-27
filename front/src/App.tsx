@@ -84,14 +84,14 @@ const App: React.FC = () => {
     },
     {
       id: "pid-control",
-      name: "Điều Khiển PID",
+      name: "Cấu Hình PID",
       description: "Cấu hình tham số PID cho các động cơ",
       icon: <Settings size={20} />,
       category: "configuration"
     },
     {
       id: "trajectory",
-      name: "Quỹ Đạo Robot",
+      name: "Chuyển Động Robot",
       description: "Hiển thị quỹ đạo chuyển động của robot",
       icon: <BarChart3 size={20} />,
       category: "monitoring"
@@ -293,37 +293,10 @@ const App: React.FC = () => {
               </div>
               <div className="flex items-center gap-4">
                 <GlobalRobotSelector />
-                
-                <div className="flex gap-2 items-center">
-                  <button 
-                    onClick={() => setDebugMode(!debugMode)}
-                    className="bg-blue-600/50 hover:bg-blue-600 text-white px-3 py-1 rounded-md text-sm flex items-center gap-1 transition-colors"
-                  >
-                    <Settings size={16} />
-                    <span className="hidden sm:inline">{debugMode ? "Hide Debug" : "Debug Mode"}</span>
-                  </button>
-
-                  <button 
-                    onClick={() => setShowTester(!showTester)}
-                    className="bg-blue-600/50 hover:bg-blue-600 text-white px-3 py-1 rounded-md text-sm flex items-center gap-1 transition-colors"
-                  >
-                    <Code size={16} />
-                    <span className="hidden sm:inline">{showTester ? "Hide Tester" : "WS Tester"}</span>
-                  </button>
-
-                  <button 
-                    onClick={() => setShowSimulator(prev => !prev)}
-                    className={`p-2 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-400 transition-colors 
-                                ${showSimulator ? 'bg-blue-700' : 'bg-blue-500'}`}
-                    title={showSimulator ? "Ẩn Simulator" : "Hiện Simulator"}
-                  >
-                    <TestTubeDiagonal size={20} />
-                  </button>
-                </div>
               </div>
             </div>
             
-            {debugMode && (
+            {/* {debugMode && (
               <div className="bg-gray-800 text-white p-2 text-xs overflow-auto max-h-32">
                 <div className="font-bold mb-1">Debug Information:</div>
                 <div>Environment: {import.meta.env.MODE}</div>
@@ -331,7 +304,7 @@ const App: React.FC = () => {
                   <ConnectionStatusWidget />
                 </div>
               </div>
-            )}
+            )} */}
             
             {/* Main Content with Sidebar and Drop Area */}
             <div className="flex-grow flex overflow-hidden">
@@ -361,28 +334,6 @@ const App: React.FC = () => {
                   >
                     <ActivitySquare size={16} />
                     {!collapseSidebar && <span>Control</span>}
-                  </button>
-                  
-                  <button 
-                    onClick={() => setActiveCategory("monitoring")}
-                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2
-                      ${activeCategory === "monitoring" 
-                        ? "bg-blue-100 text-blue-700" 
-                        : "text-gray-600 hover:bg-gray-100"}`}
-                  >
-                    <Layers size={16} />
-                    {!collapseSidebar && <span>Monitoring</span>}
-                  </button>
-                  
-                  <button 
-                    onClick={() => setActiveCategory("configuration")}
-                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2
-                      ${activeCategory === "configuration" 
-                        ? "bg-blue-100 text-blue-700" 
-                        : "text-gray-600 hover:bg-gray-100"}`}
-                  >
-                    <Settings size={16} />
-                    {!collapseSidebar && <span>Configuration</span>}
                   </button>
                 </div>
                 

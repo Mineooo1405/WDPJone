@@ -46,8 +46,11 @@ const MainArea: React.FC<MainAreaProps> = ({
   return (
     <div 
       ref={(el) => {
-        containerRef.current = el;
         drop(el);
+        // Assign to ref only if not null
+        if (el) {
+          (containerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+        }
       }}
       className="relative w-full h-full p-6 bg-gray-100 overflow-auto"
     >
