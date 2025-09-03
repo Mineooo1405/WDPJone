@@ -15,7 +15,8 @@ build/
 .env
 
 temp_firmware/
-
+Robot_code/
 OTA1_Omni/
 OTA0_FirmwareUpdate/
 Omni_Server/
+_pycache_/

@@ -1,0 +1,1 @@
+1756783320.761 {"robot_ip": "192.168.1.11", "robot_alias": "192.168.1.11", "timestamp": 1756783320.7606168, "type": "generic_registration", "data": {"type": "registration", "robot_id": "robot1"}}

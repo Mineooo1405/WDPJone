@@ -47,7 +47,7 @@ interface FirmwareHistory {
   duration?: number;
 }
 
-const FirmwareUpdateWidget: React.FC = () => {
+const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   const { selectedRobotId, connectedRobots } = useRobotContext(); // Get connectedRobots for IP lookup
   const { sendMessage, subscribeToMessageType, isConnected: webSocketIsConnected, error: webSocketError } = useWebSocket();
   
@@ -86,7 +86,9 @@ const FirmwareUpdateWidget: React.FC = () => {
     description?: string;
   }>({});
   const [targetRobotForOtaIp, setTargetRobotForOtaIp] = useState<string | null>(null);
-  const [otaType, setOtaType] = useState<'OTA0' | 'OTA1' | null>(null);
+  const [otaType, setOtaType] = useState<'OTA0' | 'OTA1' | null>(compact ? 'OTA1' : null);
+  const [otaClientConnected, setOtaClientConnected] = useState(false);
+  const [otaServerPort, setOtaServerPort] = useState<number | null>(null);
 
   // State for expected OTA0 IP
   const [expectedOta0Ip, setExpectedOta0Ip] = useState<string>("");
@@ -258,15 +260,17 @@ const FirmwareUpdateWidget: React.FC = () => {
                 }
             }
         }
-    } else if (message.type === 'ota_status') { // Messages from robot during OTA (e.g. progress, completion)
-        addLog(`OTA Status from Robot ${message.robot_ip}: ${message.status} - ${message.message} (${message.progress}%)`);
-        if (message.progress) setProgress(message.progress);
-        if (message.status === 'ota_complete') {
-            addLog(`✅ OTA thành công cho robot ${message.robot_ip}`);
-            setOtaStatus('idle'); // Reset for next operation
-            // Potentially clear selected file or target IP after success
+    } else if (message.type === 'ota_status') { // Messages from robot/bridge during OTA
+        addLog(`OTA Status for ${message.robot_ip}: ${message.status} - ${message.message || ''} (${message.progress ?? 0}%)`);
+        if (typeof message.progress === 'number') setProgress(message.progress);
+        if (message.status === 'client_connected') {
+            setOtaClientConnected(true);
+            if (message.ota_port) setOtaServerPort(Number(message.ota_port));
+        } else if (message.status === 'ota_complete') {
+            setOtaClientConnected(false);
+            setOtaStatus('idle');
         } else if (message.status === 'ota_failed') {
-            addLog(`❌ OTA thất bại cho robot ${message.robot_ip}: ${message.message}`);
+            setOtaClientConnected(false);
             setOtaStatus('error');
             setErrorMessage(message.message || "Lỗi OTA từ robot.");
         }
@@ -298,7 +302,7 @@ const FirmwareUpdateWidget: React.FC = () => {
     const unsubFirmwareStatusError = subscribeToMessageType('firmware_status', handleActualFirmwareResponse, `${uniqueIdPrefix}-firmware_status_error`); // For bridge errors
     const unsubFirmwareResponseError = subscribeToMessageType('firmware_response', handleActualFirmwareResponse, `${uniqueIdPrefix}-firmware_response_error`);
     const unsubChunkAck = subscribeToMessageType('firmware_chunk_ack', handleActualFirmwareResponse, `${uniqueIdPrefix}-chunk_ack`);
-    const unsubOtaStatus = subscribeToMessageType('ota_status', handleActualFirmwareResponse, `${uniqueIdPrefix}-ota_status`); // For robot's OTA feedback
+    const unsubOtaStatus = subscribeToMessageType('ota_status', handleActualFirmwareResponse, `${uniqueIdPrefix}-ota_status`); // For robot's OTA/bridge feedback
     const unsubFirmwareProg = subscribeToMessageType('firmware_progress', handleActualFirmwareProgress, `${uniqueIdPrefix}-firmware_progress`);
     const unsubFirmwareVer = subscribeToMessageType('firmware_version', handleActualFirmwareVersion, `${uniqueIdPrefix}-firmware_version`);
 
@@ -617,6 +621,20 @@ const FirmwareUpdateWidget: React.FC = () => {
             </div>
           </div>
 
+          {/* OTA server status (simple view like Omni_Server) */}
+          <div className="mb-4 flex items-center justify-between bg-gray-50 p-3 rounded-md">
+            <div className="flex items-center gap-4">
+              <div className="flex items-center">
+                <span className="mr-2 text-sm text-gray-600">OTA Port:</span>
+                <span className="font-mono text-sm">{otaServerPort ?? 12345}</span>
+              </div>
+              <div className="flex items-center">
+                <div className={`w-3 h-3 rounded-full mr-2 ${otaClientConnected ? 'bg-green-500' : 'bg-gray-400'}`}></div>
+                <span className="text-sm">{otaClientConnected ? 'Robot đã kết nối OTA' : 'Đang chờ robot kết nối OTA'}</span>
+              </div>
+            </div>
+          </div>
+
           {/* OTA0 Path Guidance */}
           {otaStatus === 'robot_selected_for_ota0' && otaType === 'OTA0' && targetRobotForOtaIp && (
             <div className="mb-4 bg-blue-50 border-l-4 border-blue-500 text-blue-700 p-3 rounded">
@@ -626,7 +644,7 @@ const FirmwareUpdateWidget: React.FC = () => {
           )}
 
           {/* OTA1 Path Guidance: Step 1 - Robot Selected, Ready to Command Upgrade */}
-          {otaStatus === 'robot_selected_for_ota1' && otaType === 'OTA1' && targetRobotForOtaIp && (
+          {!compact && otaStatus === 'robot_selected_for_ota1' && otaType === 'OTA1' && targetRobotForOtaIp && (
             <div className="mb-4 bg-orange-50 border-l-4 border-orange-500 text-orange-700 p-3 rounded">
               <p className="font-medium">Chế độ OTA1: Robot mục tiêu IP {targetRobotForOtaIp}.</p>
               <p>Nhấn "Yêu cầu Robot vào Chế Độ Nâng Cấp (OTA1)" để robot chuẩn bị nhận firmware.</p>
@@ -634,7 +652,7 @@ const FirmwareUpdateWidget: React.FC = () => {
           )}
 
           {/* OTA1 Path Guidance: Step 2 - Upgrade Command Sent, Ready to Select File & Upload */}
-          {otaStatus === 'ota1_upgrade_command_sent' && otaType === 'OTA1' && targetRobotForOtaIp && (
+          {!compact && otaStatus === 'ota1_upgrade_command_sent' && otaType === 'OTA1' && targetRobotForOtaIp && (
             <div className="mb-4 bg-yellow-50 border-l-4 border-yellow-500 text-yellow-700 p-3 rounded">
               <p className="font-medium">Đã gửi lệnh "Upgrade" cho Robot {targetRobotForOtaIp} (OTA1)!</p>
               <p>Robot nên khởi động lại vào chế độ OTA. Tiếp theo, chọn file firmware (nếu chưa) và nhấn "Tải Firmware lên Server...".</p>
@@ -706,7 +724,10 @@ const FirmwareUpdateWidget: React.FC = () => {
                   webSocketIsConnected &&
                   targetRobotForOtaIp &&
                   selectedFile &&
-                  otaStatus === 'file_selected'
+                  (
+                    (otaType === 'OTA0' && otaStatus === 'file_selected') ||
+                    (otaType === 'OTA1' && (otaStatus === 'file_selected' || otaClientConnected))
+                  )
               )}
               className={`px-4 py-2 rounded-md flex items-center gap-2
                 ${ 
@@ -714,7 +735,7 @@ const FirmwareUpdateWidget: React.FC = () => {
                     webSocketIsConnected &&
                     targetRobotForOtaIp &&
                     selectedFile &&
-                    otaStatus === 'file_selected'
+                    ((otaType === 'OTA0' && otaStatus === 'file_selected') || (otaType === 'OTA1' && (otaStatus === 'file_selected' || otaClientConnected)))
                    )
                   ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                     : 'bg-blue-600 text-white hover:bg-blue-700'
@@ -728,13 +749,14 @@ const FirmwareUpdateWidget: React.FC = () => {
               ) : (
                 <>
                   <Upload size={16} />
-                  <span>Tải Firmware lên Server cho Robot {targetRobotForOtaIp || ""}</span>
+                  <span>Gửi Firmware</span>
                 </>
               )}
             </button>
           </div>
         </div>
         
+        {!compact && (
         <div className="flex-1 flex flex-col">
           <div className="flex items-center justify-between mb-2">
             <div 
@@ -859,6 +881,7 @@ const FirmwareUpdateWidget: React.FC = () => {
             </ol>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

@@ -372,7 +372,7 @@ const IMUWidget: React.FC = () => {
       if (subscribedToRobotRef.current) {
         console.log(`IMUWidget: WS not ready or no robot. Attempting to unsubscribe from ${subscribedToRobotRef.current}`);
         sendJsonMessage({
-          command: "direct_unsubscribe",
+          command: "unsubscribe",
           type: "imu_data",
           robot_alias: subscribedToRobotRef.current
         });
@@ -386,7 +386,7 @@ const IMUWidget: React.FC = () => {
       if (subscribedToRobotRef.current && subscribedToRobotRef.current !== selectedRobotId) {
         console.log(`IMUWidget: Robot changed. Unsubscribing from ${subscribedToRobotRef.current}`);
         sendJsonMessage({
-          command: "direct_unsubscribe",
+          command: "unsubscribe",
           type: "imu_data",
           robot_alias: subscribedToRobotRef.current
         });
@@ -396,7 +396,7 @@ const IMUWidget: React.FC = () => {
       if (subscribedToRobotRef.current !== selectedRobotId) {
         console.log(`IMUWidget: Subscribing to imu_data for ${selectedRobotId}`);
         sendJsonMessage({
-          command: "direct_subscribe",
+          command: "subscribe",
           type: "imu_data",
           robot_alias: selectedRobotId
         });
@@ -407,7 +407,7 @@ const IMUWidget: React.FC = () => {
       if (subscribedToRobotRef.current === selectedRobotId) {
         console.log(`IMUWidget: Live update off. Unsubscribing from ${selectedRobotId}`);
         sendJsonMessage({
-          command: "direct_unsubscribe",
+          command: "unsubscribe",
           type: "imu_data",
           robot_alias: selectedRobotId
         });
@@ -419,7 +419,7 @@ const IMUWidget: React.FC = () => {
       if (subscribedToRobotRef.current && readyState === ReadyState.OPEN) {
         console.log(`IMUWidget: Cleanup. Unsubscribing from ${subscribedToRobotRef.current}`);
         sendJsonMessage({
-          command: "direct_unsubscribe",
+          command: "unsubscribe",
           type: "imu_data",
           robot_alias: subscribedToRobotRef.current
         });

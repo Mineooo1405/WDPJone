@@ -1,25 +1,18 @@
-from csv import writer
 import sys
 import os
 import asyncio
-from aiohttp import payload_type
 import websockets
 import json
 import logging
 from connection_manager import ConnectionManager 
 import time
-from datetime import datetime
 import argparse
 import math
-import re
 from dotenv import load_dotenv
 import base64
 
 # Load environment variables from .env file
 load_dotenv()
-
-# --- Global Trajectory Calculator ---
-trajectory_calculator = None # Will be initialized in main
 
 # --- Configuration from Environment Variables with Fallbacks ---
 TCP_PORT_DEFAULT = 12346
@@ -44,11 +37,6 @@ robot_alias_manager = {
     "lock": asyncio.Lock()
 }
 
-# --- Global subscribers dictionary ---
-# subscribers[data_type][robot_ip] = set of websockets
-# Example: subscribers["encoder"]["192.168.1.101"] = {ws1, ws2}
-subscribers = {} 
-
 # --- Global set for UI WebSocket clients ---
 ui_websockets = set()
 
@@ -71,15 +59,19 @@ async def broadcast_to_all_ui(message_payload):
 # --- TrajectoryCalculator class ---
 class TrajectoryCalculator: 
     def __init__(self):
-        self.robot_data = {}  # Keyed by unique_robot_key (ip:port)
+        self.robot_data = {}  # Keyed by unique_robot_key (ip:port or alias/IP)
+        self.CONTROL_SUPPRESS_WINDOW = 0.5  # seconds: if encoder seen recently, skip control integration
 
     def _ensure_robot_data(self, unique_robot_key):
         if unique_robot_key not in self.robot_data:
             self.robot_data[unique_robot_key] = {
                 "x": 0.0, "y": 0.0, "theta": 0.0,
                 "last_timestamp_encoder": None,
+                "last_timestamp_control": None,
+                "last_imu_path_time": 0.0,
                 "path_history": [],
-                "latest_imu_data": None
+                "latest_imu_data": None,
+                "imu_missing_warned": False
             }
 
     def update_imu_data(self, unique_robot_key, imu_data):
@@ -90,9 +82,24 @@ class TrajectoryCalculator:
             yaw = imu_data["yaw"]
         elif "euler" in imu_data and len(imu_data["euler"]) == 3:
             yaw = imu_data["euler"][2]
+        robot_state = self.robot_data[unique_robot_key]
         if yaw is not None:
-            self.robot_data[unique_robot_key]["theta"] = yaw
-        self.robot_data[unique_robot_key]["latest_imu_data"] = imu_data
+            robot_state["theta"] = yaw
+        robot_state["latest_imu_data"] = imu_data
+        # Reset warning flag when IMU arrives
+        robot_state["imu_missing_warned"] = False
+
+        # Optionally append a path point on IMU-only updates to allow UI drawing (x,y unchanged)
+        now_t = time.time()
+        if now_t - robot_state.get("last_imu_path_time", 0.0) >= 0.2:  # throttle to 5 Hz
+            new_point = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+            robot_state["path_history"].append(new_point)
+            if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
+                robot_state["path_history"] = robot_state["path_history"][-MAX_TRAJECTORY_POINTS_DEFAULT:]
+            robot_state["last_imu_path_time"] = now_t
+        # Return current snapshot for convenience
+        current_pose = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+        return {"position": current_pose, "path": list(robot_state["path_history"]) }
 
     def _rpm_to_omega(self, rpm):
         return rpm * (2 * math.pi) / 60.0
@@ -101,12 +108,10 @@ class TrajectoryCalculator:
         self._ensure_robot_data(unique_robot_key)
         robot_state = self.robot_data[unique_robot_key]
         imu_data = robot_state["latest_imu_data"]
-
-        if not imu_data:
-            logger.warning(f"IMU data not available for {unique_robot_key}. Returning current state for trajectory update.")
-            current_pose_dict = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
-            # Return the structured dictionary
-            return {"position": current_pose_dict, "path": list(robot_state["path_history"])}
+        # If IMU is missing, proceed using current theta but warn only once
+        if not imu_data and not robot_state["imu_missing_warned"]:
+            logger.warning(f"IMU data not available for {unique_robot_key}. Falling back to odometry-only heading.")
+            robot_state["imu_missing_warned"] = True
 
         timestamp_encoder = encoder_data.get("timestamp", time.time())
         # The 'data' key in encoder_data from transform_robot_message contains the RPM list
@@ -119,12 +124,11 @@ class TrajectoryCalculator:
             return {"position": current_pose_dict, "path": list(robot_state["path_history"])}
         
         current_heading_rad = robot_state["theta"] # Default to current state theta
-        if "yaw" in imu_data: # This check is fine
-            current_heading_rad = imu_data["yaw"]
-        elif "euler" in imu_data and isinstance(imu_data.get("euler"), list) and len(imu_data["euler"]) == 3:
-            current_heading_rad = imu_data["euler"][2]
-        else:
-            current_heading_rad = robot_state["theta"]
+        if imu_data:
+            if "yaw" in imu_data: # This check is fine
+                current_heading_rad = imu_data["yaw"]
+            elif "euler" in imu_data and isinstance(imu_data.get("euler"), list) and len(imu_data["euler"]) == 3:
+                current_heading_rad = imu_data["euler"][2]
         if robot_state["last_timestamp_encoder"] is None:
             robot_state["last_timestamp_encoder"] = timestamp_encoder
             return None  # No movement yet
@@ -151,43 +155,73 @@ class TrajectoryCalculator:
         # This return is already correct
         return {"position": new_point, "path": list(robot_state["path_history"])}
 
+    def update_control_command(self, unique_robot_key, vx_robot, vy_robot, omega, timestamp=None):
+        """
+        Integrate control commands when encoder data is absent. vx/vy are robot-frame linear velocities (m/s),
+        omega is angular velocity (rad/s). Uses current heading to convert to world frame.
+        Suppresses integration if encoder updated very recently.
+        """
+        self._ensure_robot_data(unique_robot_key)
+        robot_state = self.robot_data[unique_robot_key]
+
+        # If encoder has been seen very recently, skip control-based integration to avoid double-counting
+        last_enc_t = robot_state.get("last_timestamp_encoder")
+        now_t = timestamp if timestamp is not None else time.time()
+        if last_enc_t is not None and (now_t - last_enc_t) <= self.CONTROL_SUPPRESS_WINDOW:
+            return {"position": {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]},
+                    "path": list(robot_state["path_history"]) }
+
+        # Initialize timing for control
+        if robot_state.get("last_timestamp_control") is None:
+            robot_state["last_timestamp_control"] = now_t
+            # Append a point so UI can draw even before motion accumulates
+            new_point = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+            robot_state["path_history"].append(new_point)
+            if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
+                robot_state["path_history"] = robot_state["path_history"][-MAX_TRAJECTORY_POINTS_DEFAULT:]
+            return {"position": new_point, "path": list(robot_state["path_history"]) }
+
+        dt = now_t - robot_state["last_timestamp_control"]
+        if dt <= 0:
+            return {"position": {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]},
+                    "path": list(robot_state["path_history"]) }
+        robot_state["last_timestamp_control"] = now_t
+
+        # Transform to world frame using current heading
+        theta = robot_state["theta"]
+        cos_h = math.cos(theta)
+        sin_h = math.sin(theta)
+        vx_world = vx_robot * cos_h - vy_robot * sin_h
+        vy_world = vx_robot * sin_h + vy_robot * cos_h
+
+        robot_state["x"] += vx_world * dt
+        robot_state["y"] += vy_world * dt
+        robot_state["theta"] += omega * dt  # Will be overridden by IMU when available
+
+        new_point = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+        robot_state["path_history"].append(new_point)
+        if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
+            robot_state["path_history"] = robot_state["path_history"][-MAX_TRAJECTORY_POINTS_DEFAULT:]
+        return {"position": new_point, "path": list(robot_state["path_history"]) }
+
     def clear_path_history(self, unique_robot_key):
         self._ensure_robot_data(unique_robot_key)
         robot_state = self.robot_data[unique_robot_key]
         robot_state["path_history"].clear()
-        
-        # Optionally, you might want to reset the robot's current position (x, y, theta)
-        # if "clear" means a full reset of its known pose. For now, just clearing path.
-        # robot_state["x"] = 0.0 
-        # robot_state["y"] = 0.0
-        # robot_state["theta"] = 0.0 # Or keep last known theta
-
         logger.info(f"Path history cleared for robot {unique_robot_key}")
         
         # Return the current pose and an empty path to allow broadcasting an update
         current_pose_dict = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
         return {"position": current_pose_dict, "path": []}
 
-# --- broadcast_to_subscribers, calculate_distance, DataLogger (như cũ, DataLogger uses unique_robot_key) ---
-async def broadcast_to_subscribers(data_type, robot_alias, message_payload): # Added robot_alias
-    # ... (rest of the function needs to be adapted if it's generic)
-    # For trajectory, we'll broadcast specifically
-    # logger.debug(f"Attempting to broadcast for {data_type} and robot {robot_alias}")
-    if data_type in subscribers and robot_alias in subscribers[data_type]:
-        message_json = json.dumps(message_payload)
-        # logger.debug(f"Broadcasting to {len(subscribers[data_type][robot_alias])} subscribers for {robot_alias}: {message_json}")
-        tasks = [ws.send_str(message_json) for ws in subscribers[data_type][robot_alias]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                # logger.error(f"Error broadcasting to subscriber for {robot_alias}: {result}")
-                # Optionally remove problematic subscriber
-                pass # Pass for now
-    # else:
-        # logger.debug(f"No subscribers for {data_type} and robot {robot_alias}")
+    def get_snapshot(self, unique_robot_key):
+        """Return current pose and full path for a robot, if known."""
+        if unique_robot_key not in self.robot_data:
+            return None
+        robot_state = self.robot_data[unique_robot_key]
+        current_pose_dict = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+        return {"position": current_pose_dict, "path": list(robot_state["path_history"]) }
 
-# DataLogger will use unique_robot_key (ip:port) for its internal file management
-# The `robot_id` argument to DataLogger methods will be this unique_robot_key
 class DataLogger:
     def __init__(self, log_directory=None):
         self.log_directory = log_directory or os.environ.get("LOG_DIRECTORY", LOG_DIRECTORY_DEFAULT)
@@ -278,6 +312,11 @@ class DataLogger:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("DirectBridge")
+log_tcp = logger.getChild("TCP")
+log_ws = logger.getChild("WS")
+log_ota = logger.getChild("OTA")
+log_fw = logger.getChild("FWUP")
+log_traj = logger.getChild("TRAJ")
 # Initialize DataLogger with None, so it picks up from env or default
 data_logger = DataLogger()
 
@@ -289,6 +328,7 @@ class OTAConnection:
         self.firmware_to_send_path = None
         self.ota_server_instance = None # To hold the asyncio.Server object
         self.ota_server_robot_ip_target = None # Stores target robot IP
+        self._ws_broadcast = broadcast_to_all_ui
 
     async def prepare_firmware_for_send(self, file_path, target_robot_ip): # Changed target_robot_id to target_robot_ip
         if not os.path.exists(file_path):
@@ -305,59 +345,133 @@ class OTAConnection:
         robot_ip_port_str = f"{robot_actual_ip}:12345"
         # Use self.ota_port_arg_val if available and consistent, or directly log the port it's bound to.
         # Assuming self.ota_port_arg_val holds the port the persistent server was started on.
-        logger.info(f"OTA Client connected from {robot_ip_port_str} to always-on server port {getattr(self, 'ota_port_arg_val', 'UNKNOWN')}.")
+        log_ota.info(f"Client connected from {robot_ip_port_str} (listening port {getattr(self, 'ota_port_arg_val', 'UNKNOWN')})")
 
         firmware_was_sent = False
         current_firmware_path_for_this_connection = None
 
         # Check if firmware is prepared for this specific IP
         if self.firmware_to_send_path and self.ota_server_robot_ip_target == robot_actual_ip:
-            logger.info(f"Target robot {robot_actual_ip} connected. Firmware {self.firmware_to_send_path} is designated.")
+            log_ota.info(f"Target robot {robot_actual_ip} connected. Firmware {os.path.basename(self.firmware_to_send_path)} is designated.")
             current_firmware_path_for_this_connection = self.firmware_to_send_path
             
             # We will consume/clear these paths AFTER a successful send or a definitive failure for this target.
         elif not self.firmware_to_send_path:
-            logger.warning(f"OTA Client {robot_actual_ip} connected, but no firmware is currently prepared/available.")
+            log_ota.warning(f"Client {robot_actual_ip} connected, but no firmware prepared/available.")
         elif self.ota_server_robot_ip_target != robot_actual_ip:
-            logger.warning(f"OTA Client {robot_actual_ip} connected, but current firmware is targeted for {self.ota_server_robot_ip_target}. This client will not receive this firmware.")
+            log_ota.warning(f"Client {robot_actual_ip} connected, but firmware is targeted for {self.ota_server_robot_ip_target}. No send.")
         
+        # Notify UI that a client connected to OTA server
+        try:
+            await self._ws_broadcast({
+                "type": "ota_status",
+                "robot_ip": robot_actual_ip,
+                "status": "client_connected",
+                "message": f"Robot {robot_ip_port_str} connected to OTA server",
+                "ota_port": getattr(self, 'ota_port_arg_val', None),
+                "timestamp": time.time()
+            })
+        except Exception:
+            pass
+
         if current_firmware_path_for_this_connection:
             try:
-                logger.info(f"Starting firmware send of {current_firmware_path_for_this_connection} to {robot_ip_port_str}")
+                log_ota.info(f"Start sending firmware {os.path.basename(current_firmware_path_for_this_connection)} to {robot_ip_port_str}")
                 with open(current_firmware_path_for_this_connection, "rb") as f:
                     chunk_size = 1024
+                    total_size = os.path.getsize(current_firmware_path_for_this_connection)
+                    sent_bytes = 0
+                    # Optional handshake: wait briefly for any byte from client (some firmwares send a kickoff byte)
+                    try:
+                        await asyncio.wait_for(reader.read(1), timeout=0.5)
+                        log_ota.debug(f"Received kickoff byte from {robot_ip_port_str} - starting stream")
+                    except asyncio.TimeoutError:
+                        # No kickoff received; proceed anyway
+                        await asyncio.sleep(0.1)
+                    # Notify start
+                    try:
+                        await self._ws_broadcast({
+                            "type": "ota_status",
+                            "robot_ip": robot_actual_ip,
+                            "status": "sending",
+                            "message": "Sending firmware...",
+                            "progress": 0,
+                            "total_bytes": total_size,
+                            "sent_bytes": 0,
+                            "timestamp": time.time()
+                        })
+                    except Exception:
+                        pass
                     while True: # This loop is now correctly indented
                         chunk = f.read(chunk_size)
                         if not chunk:
                             break
                         writer.write(chunk)
                         await writer.drain()
-                logger.info(f"Firmware sent successfully to {robot_ip_port_str}")
+                        sent_bytes += len(chunk)
+                        # Throttle progress events
+                        if total_size > 0 and (sent_bytes == total_size or sent_bytes % (chunk_size*16) == 0):
+                            try:
+                                await self._ws_broadcast({
+                                    "type": "ota_status",
+                                    "robot_ip": robot_actual_ip,
+                                    "status": "sending",
+                                    "message": "Sending firmware...",
+                                    "progress": int(sent_bytes * 100 / total_size),
+                                    "total_bytes": total_size,
+                                    "sent_bytes": sent_bytes,
+                                    "timestamp": time.time()
+                                })
+                            except Exception:
+                                pass
+                log_ota.info(f"Firmware sent successfully to {robot_ip_port_str}")
                 firmware_was_sent = True
+                # Notify complete
+                try:
+                    await self._ws_broadcast({
+                        "type": "ota_status",
+                        "robot_ip": robot_actual_ip,
+                        "status": "ota_complete",
+                        "message": "Firmware sent successfully",
+                        "progress": 100,
+                        "timestamp": time.time()
+                    })
+                except Exception:
+                    pass
                 
                 # Firmware sent successfully, so consume it (clear path and target for next OTA)
                 self.firmware_to_send_path = None 
                 self.ota_server_robot_ip_target = None
-                logger.info(f"Consumed firmware {current_firmware_path_for_this_connection} after sending to {robot_actual_ip}.")
+                log_ota.info(f"Consumed firmware {os.path.basename(current_firmware_path_for_this_connection)} after sending to {robot_actual_ip}.")
                 
                 # Optionally, delete the temp firmware file if desired
                 try:
                     if os.path.exists(current_firmware_path_for_this_connection): # Check before deleting
                         os.remove(current_firmware_path_for_this_connection)
-                        logger.info(f"Deleted temporary firmware file: {current_firmware_path_for_this_connection}")
+                        log_ota.info(f"Deleted temporary firmware file: {current_firmware_path_for_this_connection}")
                 except OSError as e_del:
                     logger.error(f"Error deleting temporary firmware file {current_firmware_path_for_this_connection}: {e_del}")
             except Exception as e:
-                logger.error(f"Error sending firmware to {robot_ip_port_str}: {e}")
+                log_ota.error(f"Error sending firmware to {robot_ip_port_str}: {e}")
+                try:
+                    await self._ws_broadcast({
+                        "type": "ota_status",
+                        "robot_ip": robot_actual_ip,
+                        "status": "ota_failed",
+                        "message": str(e),
+                        "timestamp": time.time()
+                    })
+                except Exception:
+                    pass
                 # If send failed for the intended target, still consume the firmware
                 # to prevent retries with potentially corrupted state or a bad file.
                 if self.ota_server_robot_ip_target == robot_actual_ip and \
                    self.firmware_to_send_path == current_firmware_path_for_this_connection: # ensure it was the intended target and path
                     self.firmware_to_send_path = None
                     self.ota_server_robot_ip_target = None
-                    logger.info(f"Cleared firmware path for {robot_actual_ip} due to send error for {current_firmware_path_for_this_connection}.")
+                    log_ota.info(f"Cleared firmware path for {robot_actual_ip} after send error for {current_firmware_path_for_this_connection}.")
             else:
-                logger.info(f"No firmware will be sent to {robot_ip_port_str} in this session (either not prepared, or for wrong target).")
+                log_ota.info(f"No firmware sent to {robot_ip_port_str} (not prepared or wrong target).")
         
         writer.close()
         try:
@@ -365,7 +479,7 @@ class OTAConnection:
         except Exception as e_close:
             logger.error(f"Error during writer.wait_closed() for OTA client {robot_ip_port_str}: {e_close}")
         
-        logger.info(f"OTA client connection with {robot_ip_port_str} closed. Main OTA server remains listening.")
+        log_ota.info(f"Client {robot_ip_port_str} disconnected. OTA server remains listening.")
         # The main self.ota_server_instance is NOT closed here.
 
     async def start_ota_server_once(self, ota_port=12345):
@@ -387,10 +501,7 @@ class OTAConnection:
                 self.handle_ota_robot_connection, '0.0.0.0', ota_port
             )
             logger.info(f"Temporary OTA Server started on 0.0.0.0:{ota_port} for {self.ota_server_robot_ip_target}. It will close after one connection.")
-            # This server would need to be closed in handle_ota_robot_connection if temporary.
-            # For always-on, this method isn't the primary way to start.
-            # To make it truly "once", one would assign temp_server to self.ota_server_instance
-            # and then close it in the handler. But we are moving to persistent.
+
             return True # Placeholder, actual instance management changes.
         except Exception as e:
             logger.error(f"Failed to start temporary OTA server on port {ota_port}: {e}")
@@ -420,12 +531,6 @@ class OTAConnection:
             logger.info("OTA Server stopped by request.")
         self.firmware_to_send_path = None
         self.ota_server_robot_ip_target = None
-
-
-    # --- Old OTA Client Logic (REMOVED as direct_bridge acts as OTA Server) ---
-    # async def connect(self, ip_address, port, robot_id): ... (REMOVED)
-    # def get_connection(self, robot_id=None, ip_address=None, port=None): ... (REMOVED)
-    # async def disconnect(self, robot_id=None, ip_address=None, port=None): ... (REMOVED)
 
 # ==================== FirmwareUploadManager ====================
 class FirmwareUploadManager:
@@ -502,27 +607,97 @@ class DirectBridge:
         self._latest_imu_data = {} # Initialize latest IMU data
         self.fw_upload_mgr = FirmwareUploadManager(self.temp_firmware_dir)
 
+    def build_robot_status_snapshot(self, unique_robot_key: str, robot_alias: str, robot_ip: str):
+        """Assemble a robot_status snapshot from latest cached data."""
+        latest_enc = self._latest_encoder_data.get(unique_robot_key)
+        rpm_list = []
+        if isinstance(latest_enc, dict):
+            data_field = latest_enc.get("data")
+            if isinstance(data_field, list):
+                rpm_list = data_field[:3]
+        if len(rpm_list) < 3:
+            rpm_list = [0, 0, 0]
+
+        pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
+        snap = self.trajectory_calculator.get_snapshot(unique_robot_key)
+        if isinstance(snap, dict) and isinstance(snap.get("position"), dict):
+            pos = snap["position"]
+            pose["x"] = float(pos.get("x", 0.0))
+            pose["y"] = float(pos.get("y", 0.0))
+            pose["theta"] = float(pos.get("theta", 0.0))
+
+        payload = {
+            "type": "robot_status",
+            "robot_ip": robot_ip,
+            "robot_alias": robot_alias,
+            "timestamp": time.time(),
+            "encoders": {"rpm": rpm_list},
+            "position": pose,
+        }
+        return payload
+
+    async def get_robot_key_from_alias(self, robot_alias: str) -> str:
+        """Resolve alias (now using robot IP) -> unique robot key (ip:port)."""
+        if not robot_alias:
+            return None
+        # If alias already in ip:port form, return it directly
+        if ":" in robot_alias and robot_alias.count(":") == 1:
+            return robot_alias
+        # Otherwise treat alias as IP and resolve via ConnectionManager
+        return ConnectionManager.get_robot_id_by_ip(robot_alias)
+
+    async def send_text_command_by_alias(self, robot_alias: str, command_text: str) -> bool:
+        """Send a plaintext command (ensures trailing newline) to robot by alias."""
+        unique_key = await self.get_robot_key_from_alias(robot_alias)
+        if not unique_key:
+            return False
+        conn_tuple = ConnectionManager.get_tcp_client(unique_key)
+        if not conn_tuple:
+            return False
+        reader, writer = conn_tuple
+        try:
+            # Ensure newline termination for robust parsing on device
+            if not command_text.endswith("\n"):
+                command_text = command_text + "\n"
+            writer.write(command_text.encode("utf-8"))
+            await writer.drain()
+            return True
+        except Exception:
+            return False
+
+    async def send_upgrade_command_by_alias(self, robot_alias: str) -> bool:
+        """Try multiple upgrade command variants to maximize compatibility with firmware."""
+        unique_key = await self.get_robot_key_from_alias(robot_alias)
+        if not unique_key:
+            return False
+        conn_tuple = ConnectionManager.get_tcp_client(unique_key)
+        if not conn_tuple:
+            return False
+        reader, writer = conn_tuple
+        try:
+            # First try exactly "Upgrade" without newline (matches Omni_Server behavior)
+            writer.write(b"Upgrade")
+            await writer.drain()
+            await asyncio.sleep(0.05)
+            # Also try with newline in case firmware expects line-based parsing
+            writer.write(b"Upgrade\n")
+            await writer.drain()
+            return True
+        except Exception as e:
+            log_tcp.error(f"Failed to send Upgrade command to {robot_alias}: {e}")
+            return False
+
     async def get_connected_robots_list(self):
-        """
-        Helper to get the current list of connected robots and their details.
-        """
+        """Return connected robots using IP as alias."""
         robots_list = []
-        async with robot_alias_manager["lock"]:
-            for alias, ip_port_str in robot_alias_manager["alias_to_ip_port"].items():
-                # Assuming ip_port_str is "ip:port", we need to get just the IP for the list
-                # and confirm it's an active TCP connection.
-                conn_tuple = ConnectionManager.get_tcp_client(ip_port_str) # ip_port_str is the unique_key
-                if conn_tuple and conn_tuple.reader and not conn_tuple.reader.at_eof():
-                    ip_address = robot_alias_manager["alias_to_ip"].get(alias) # Get IP from alias_to_ip
-                    if not ip_address and ":" in ip_port_str: # Fallback if alias_to_ip somehow missed
-                        ip_address = ip_port_str.split(":")[0]
-                    
-                    robots_list.append({
-                        "alias": alias,
-                        "ip": ip_address if ip_address else "N/A",
-                        "unique_key": ip_port_str, # The ip:port string
-                        "status": "connected" # Or more detailed status if available
-                    })
+        for item in ConnectionManager.get_all_robots_with_ip():
+            if item.get("connected"):
+                robots_list.append({
+                    "alias": item.get("ip"),
+                    "ip": item.get("ip"),
+                    "unique_key": item.get("robot_id"),
+                    "status": "connected"
+                })
         return robots_list
 
     async def send_connected_robots_list_to_client(self, websocket_client):
@@ -603,23 +778,20 @@ class DirectBridge:
             robot_alias_for_log = target_robot_ip
             unique_key_target = None
 
-            # Find writer for the target_robot_ip
-            async with robot_alias_manager["lock"]:
-                alias_for_ip = robot_alias_manager["ip_to_alias"].get(target_robot_ip)
-                if alias_for_ip:
-                    unique_key_target = robot_alias_manager["alias_to_ip_port"].get(alias_for_ip)
-            
-            if unique_key_target:
-                 conn_tuple = ConnectionManager.get_tcp_client(unique_key_target)
-                 if conn_tuple:
-                    writer_to_use = conn_tuple.writer
-                    robot_alias_for_log = conn_tuple.alias
+            # Find writer for the target_robot_ip directly from ConnectionManager
+            conn = ConnectionManager.get_tcp_client_by_addr(target_robot_ip)
+            if conn:
+                try:
+                    _, writer_to_use = conn
+                except Exception:
+                    writer_to_use = None
+                robot_alias_for_log = target_robot_ip
             
             if writer_to_use:
                 try:
                     logger.info(f"Sending PID configuration from '{self.pid_config_file}' to robot {robot_alias_for_log} ({target_robot_ip}).")
                     for motor_id, p_values in pid_data_per_motor.items():
-                        pid_command_str = f"MOTOR:{motor_id} Kp:{p_values['kp']} Ki:{p_values['ki']} Kd:{p_values['kd']}" # No \n
+                        pid_command_str = f"MOTOR:{motor_id} Kp:{p_values['kp']} Ki:{p_values['ki']} Kd:{p_values['kd']}\n"
                         writer_to_use.write(pid_command_str.encode('utf-8'))
                         await writer_to_use.drain()
                         logger.debug(f"Sent to {target_robot_ip}: {pid_command_str}")
@@ -669,7 +841,7 @@ class DirectBridge:
         self.tcp_server = await asyncio.start_server(
             self.handle_tcp_client, '0.0.0.0', self.tcp_port
         )
-        logger.info(f"TCP control server started on 0.0.0.0:{self.tcp_port}")
+        log_tcp.info(f"Control server started on 0.0.0.0:{self.tcp_port}")
         
         self.ws_server = await websockets.serve(
             self.handle_ws_client, 
@@ -677,7 +849,7 @@ class DirectBridge:
             self.ws_port,
             #additional_headers=self.get_websocket_cors_headers
         )
-        logger.info(f"WebSocket server started on 0.0.0.0:{self.ws_port}")
+        log_ws.info(f"WebSocket server started on 0.0.0.0:{self.ws_port}")
     
     async def handle_tcp_client(self, reader, writer):
         peername = writer.get_extra_info('peername')
@@ -685,20 +857,14 @@ class DirectBridge:
         robot_port = peername[1]
         unique_robot_key = f"{robot_ip_address}:{robot_port}"
 
-        current_alias = None
+        # Use robot IP as alias/identifier
+        current_alias = robot_ip_address
         async with robot_alias_manager["lock"]:
-            if unique_robot_key not in robot_alias_manager["ip_port_to_alias"]:
-                current_alias = f"robot{robot_alias_manager['next_robot_number']}"
-                robot_alias_manager["ip_port_to_alias"][unique_robot_key] = current_alias
-                robot_alias_manager["alias_to_ip_port"][current_alias] = unique_robot_key
-                if robot_ip_address not in robot_alias_manager["ip_to_alias"]: # Store first alias for this IP
-                    robot_alias_manager["ip_to_alias"][robot_ip_address] = current_alias
-                    robot_alias_manager["alias_to_ip"][current_alias] = robot_ip_address
-                robot_alias_manager['next_robot_number'] += 1
-                logger.info(f"🔌 New TCP (Control) connection from {robot_ip_address} (Port: {robot_port}), assigned alias: {current_alias} (Unique Key: {unique_robot_key})")
-            else:
-                current_alias = robot_alias_manager["ip_port_to_alias"][unique_robot_key]
-                logger.info(f"🔌 Re-established TCP (Control) connection from {robot_ip_address} (Port: {robot_port}), alias: {current_alias} (Unique Key: {unique_robot_key})")
+            robot_alias_manager["ip_port_to_alias"][unique_robot_key] = current_alias
+            robot_alias_manager["alias_to_ip_port"][current_alias] = unique_robot_key
+            robot_alias_manager["ip_to_alias"][robot_ip_address] = current_alias
+            robot_alias_manager["alias_to_ip"][current_alias] = robot_ip_address
+        log_tcp.info(f"Connection from {robot_ip_address}:{robot_port} registered with alias(IP): {current_alias}")
 
         if not current_alias: # Should not happen if logic above is correct
             logger.error(f"Failed to assign or retrieve alias for {unique_robot_key}. Closing connection.")
@@ -712,42 +878,27 @@ class DirectBridge:
             tcp_client=(reader, writer), 
             client_addr=(robot_ip_address, robot_port)
         )
-        logger.info(f"TCP client {current_alias} ({unique_robot_key}) registered with ConnectionManager.")
+        log_tcp.info(f"Client {current_alias} ({unique_robot_key}) registered with ConnectionManager.")
 
-        logger.info(f"TCP client {current_alias} ({unique_robot_key}) processing started.")
+        log_tcp.info(f"Processing started for {current_alias} ({unique_robot_key}).")
         
-        # Send a simple success ack for ESP32 firmware that expects it for registration_confirmed
-        try:
-            simple_ack_for_esp32 = json.dumps({"status":"success", "message":"Bridge acknowledged ESP32 connection."})+'\n'
-            writer.write(simple_ack_for_esp32.encode('utf-8'))
-            await writer.drain()
-            logger.info(f"Sent simple success ACK for ESP32 registration to {current_alias}")
-        except Exception as e:
-            logger.error(f"Error sending simple success ACK for ESP32 to {current_alias}: {e}")
-
-        # Send standard connection acknowledgement (also includes status: success)
-        try:
-            ack_message = {"type": "connection_ack", "robot_alias": current_alias, "message": "Connected to DirectBridge", "status": "success"}
-            writer.write((json.dumps(ack_message) + '\n').encode('utf-8'))
-            await writer.drain()
-            logger.info(f"Sent connection acknowledgement to {current_alias} ({robot_ip_address})")
-        except Exception as e:
-            logger.error(f"Error sending connection acknowledgement to {current_alias}: {e}")
+        # Không gửi JSON ACK qua TCP cho robot. Firmware chỉ mong đợi lệnh plaintext
+        # hoặc 'registration_response' sau khi gửi gói 'registration'.
 
         # Send cached PID config if available
         if self.pid_config_cache:
-            logger.info(f"Attempting to send cached PID config to newly connected robot {current_alias} ({robot_ip_address}).")
+            log_tcp.info(f"Attempting to send cached PID config to newly connected robot {current_alias} ({robot_ip_address}).")
             try:
                 if self.pid_config_cache: # Ensure cache is not empty
                     for motor_id, params in self.pid_config_cache.items():
-                        pid_command_str = f"MOTOR:{motor_id} Kp:{params['kp']} Ki:{params['ki']} Kd:{params['kd']}" # No \n
+                        pid_command_str = f"MOTOR:{motor_id} Kp:{params['kp']} Ki:{params['ki']} Kd:{params['kd']}\n"
                         writer.write(pid_command_str.encode('utf-8'))
                         await writer.drain()
-                        logger.debug(f"Sent cached PID to {current_alias}: {pid_command_str}")
+                        log_tcp.debug(f"Sent cached PID to {current_alias}: {pid_command_str.strip()}")
                         await asyncio.sleep(0.05) # Small delay
-                    logger.info(f"Sent cached PID config to {current_alias} ({robot_ip_address}).")
+                    log_tcp.info(f"Sent cached PID config to {current_alias} ({robot_ip_address}).")
                 else:
-                    logger.info(f"PID cache for {current_alias} is empty, not sending.")
+                    log_tcp.info(f"PID cache for {current_alias} is empty, not sending.")
             except Exception as e:
                 logger.error(f"Error sending cached PID config to {current_alias} ({robot_ip_address}): {e}")
         else:
@@ -782,11 +933,13 @@ class DirectBridge:
                 try:
                     current_line_bytes = await asyncio.wait_for(reader.readline(), timeout=TCP_CLIENT_TIMEOUT_DEFAULT) # Use defined constant
                 except asyncio.TimeoutError:
-                    logger.warning(f"Connection timeout for robot {current_alias} ({unique_robot_key}). Closing connection.")
-                    break
+                    # Không đóng kết nối chỉ vì không có dữ liệu trong khoảng thời gian chờ.
+                    # Giữ kết nối mở để robot có thể tiếp tục gửi khi có dữ liệu.
+                    log_tcp.debug(f"No data from {current_alias} for {TCP_CLIENT_TIMEOUT_DEFAULT}s; keeping connection open.")
+                    continue
                     
                 if not current_line_bytes: 
-                    logger.info(f"❌ Robot {current_alias} ({unique_robot_key}) disconnected or read error.")
+                    log_tcp.info(f"Disconnected or read error: {current_alias} ({unique_robot_key}).")
                     break 
                 
                 raw_data_str = current_line_bytes.decode().strip()
@@ -800,6 +953,19 @@ class DirectBridge:
 
                     transformed_message = transform_robot_message(message_from_robot)
                     
+                    # If robot just sent registration, optionally send ACK based on env
+                    if message_from_robot.get("type") == "registration":
+                        ack_mode = os.environ.get("BRIDGE_REG_ACK_MODE", "none").lower()
+                        if ack_mode == "plain":
+                            try:
+                                writer.write(b"registration_response\n")
+                                await writer.drain()
+                                logger.info(f"Sent plain 'registration_response' to {current_alias} as registration ACK (mode=plain).")
+                            except Exception as e:
+                                logger.error(f"Failed sending registration_response to {current_alias}: {e}")
+                        else:
+                            logger.info(f"Registration received from {current_alias}; ACK suppressed (mode={ack_mode}).")
+
                     # Populate/overwrite with correct IP and alias from the connection
                     transformed_message["robot_ip"] = robot_ip_address 
                     transformed_message["robot_alias"] = current_alias
@@ -824,6 +990,8 @@ class DirectBridge:
                         message_timestamp = transformed_message.get("timestamp")
 
                         if encoder_rpms_list is not None and message_timestamp is not None and isinstance(encoder_rpms_list, list) and len(encoder_rpms_list) >= 3:
+                            # Cache latest encoder snapshot for robot_status
+                            self._latest_encoder_data[unique_robot_key] = transformed_message
                             # Prepare payload for TrajectoryCalculator
                             # The TrajectoryCalculator now expects the 'data' field to contain the RPMs directly
                             # and 'timestamp' at the top level of the dict passed to it.
@@ -846,19 +1014,36 @@ class DirectBridge:
                             if trajectory_update_result and isinstance(trajectory_update_result.get("position"), dict) and isinstance(trajectory_update_result.get("path"), list):
                                 current_pose_data = trajectory_update_result["position"]
                                 path_history_data = trajectory_update_result["path"]
-                                
                                 trajectory_message_for_ws = {
                                     "type": "realtime_trajectory",
                                     "robot_ip": robot_ip_address ,
                                     "robot_alias": current_alias,
                                     "timestamp": time.time(), 
-                                    "position": current_pose_data, # Use the actual data
-                                    "path": path_history_data     # Use the actual data
+                                    "position": current_pose_data,
+                                    "path": path_history_data
                                 }
-                                # logger.debug(f"Broadcasting realtime_trajectory for {current_alias}: {trajectory_message_for_ws}")
                                 await self.broadcast_to_subscribers(current_alias, trajectory_message_for_ws)
+                                robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
+                                await self.broadcast_to_subscribers(current_alias, robot_status_payload)
                             else:
-                                logger.warning(f"Skipping trajectory broadcast for {current_alias} due to invalid result from TrajectoryCalculator: {trajectory_update_result}")
+                                # First encoder after connect initializes timestamp and returns None.
+                                # Send a snapshot to let UI render immediately.
+                                snap = self.trajectory_calculator.get_snapshot(unique_robot_key)
+                                if isinstance(snap, dict) and isinstance(snap.get("position"), dict) and isinstance(snap.get("path"), list):
+                                    fallback_payload = {
+                                        "type": "realtime_trajectory",
+                                        "robot_ip": robot_ip_address,
+                                        "robot_alias": current_alias,
+                                        "timestamp": time.time(),
+                                        "position": snap["position"],
+                                        "path": snap["path"]
+                                    }
+                                    await self.broadcast_to_subscribers(current_alias, fallback_payload)
+                                    # Also provide status
+                                    robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
+                                    await self.broadcast_to_subscribers(current_alias, robot_status_payload)
+                                else:
+                                    logger.warning(f"Skipping trajectory broadcast for {current_alias} due to invalid result from TrajectoryCalculator: {trajectory_update_result}")
                     
                     elif msg_type == "imu_data": 
                         # transformed_message for imu_data is:
@@ -866,18 +1051,31 @@ class DirectBridge:
                         self._latest_imu_data[unique_robot_key] = transformed_message # Store the whole transformed payload
                         
                         # Update IMU data in the trajectory calculator immediately
-                        self.trajectory_calculator.update_imu_data(unique_robot_key, transformed_message.get("data", {}))
-                        # logger.debug(f"IMU data for {unique_robot_key} (ts: {transformed_message.get(\\"timestamp\\")}) updated in TrajectoryCalculator.")
+                        imu_result = self.trajectory_calculator.update_imu_data(unique_robot_key, transformed_message.get("data", {}))
+                        # Broadcast trajectory snapshot based on IMU to allow drawing even with IMU-only
+                        if isinstance(imu_result, dict) and isinstance(imu_result.get("position"), dict) and isinstance(imu_result.get("path"), list):
+                            imu_traj_payload = {
+                                "type": "realtime_trajectory",
+                                "robot_ip": robot_ip_address,
+                                "robot_alias": current_alias,
+                                "timestamp": time.time(),
+                                "position": imu_result["position"],
+                                "path": imu_result["path"],
+                            }
+                            await self.broadcast_to_subscribers(current_alias, imu_traj_payload)
+                        # Always push robot_status on IMU update
+                        robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
+                        await self.broadcast_to_subscribers(current_alias, robot_status_payload)
 
                 except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON from {current_alias} ({robot_ip_address}) (Control): {raw_data_str}")
+                    log_tcp.error(f"Invalid JSON from {current_alias} ({robot_ip_address}) (Control): {raw_data_str}")
                 except Exception as e_proc_loop:
-                    logger.error(f"❗ Error processing data from robot {current_alias} (Control): {e_proc_loop}", exc_info=True)
+                    log_tcp.error(f"Error processing data from {current_alias} (Control): {e_proc_loop}", exc_info=True)
         
         except ConnectionResetError:
-            logger.warning(f"Connection reset by robot {current_alias} ({unique_robot_key}).")
+            log_tcp.warning(f"Connection reset by {current_alias} ({unique_robot_key}).")
         except Exception as e_main_handler:
-            logger.error(f"Unhandled error in TCP (Control) connection with {current_alias} ({unique_robot_key}): {str(e_main_handler)}", exc_info=True)
+            log_tcp.error(f"Unhandled error in TCP connection with {current_alias} ({unique_robot_key}): {str(e_main_handler)}", exc_info=True)
         
         finally:
             # ConnectionManager.remove_tcp_client(unique_robot_key) # Assuming manager handles this
@@ -899,10 +1097,10 @@ class DirectBridge:
                         if alias_being_removed in robot_alias_manager["alias_to_ip"]:
                             del robot_alias_manager["alias_to_ip"][alias_being_removed]
                     
-                    logger.info(f"Cleaned up alias mappings for {alias_being_removed} ({unique_robot_key})")
+                    log_tcp.info(f"Cleaned up alias mappings for {alias_being_removed} ({unique_robot_key})")
                     current_alias = alias_being_removed 
                 else:
-                    logger.warning(f"Attempted to clean up alias for {unique_robot_key} but it was not found in ip_port_to_alias. Current alias var: {current_alias}")
+                    log_tcp.warning(f"Attempted to clean up alias for {unique_robot_key} but it was not found in ip_port_to_alias. Current alias var: {current_alias}")
 
             if robot_announced_to_ui:
                 robot_disconnect_payload = {
@@ -923,7 +1121,7 @@ class DirectBridge:
                     await writer.wait_closed()
                 except Exception as e:
                     logger.error(f"Error closing writer for {current_alias} ({robot_ip_address}) (Key: {unique_robot_key}): {str(e)}")
-            logger.info(f"TCP (Control) connection closed for {current_alias} ({robot_ip_address}) (Key: {unique_robot_key})")
+            log_tcp.info(f"Connection closed for {current_alias} ({robot_ip_address}) (Key: {unique_robot_key})")
 
     async def broadcast_to_subscribers(self, robot_alias_source, payload):
         if not isinstance(payload, dict) or "type" not in payload or payload.get("robot_alias") != robot_alias_source:
@@ -1005,8 +1203,19 @@ class DirectBridge:
                 try:
                     data = json.loads(message_str)
                     command = data.get("command")
-                    msg_type = data.get("type") # For subscriptions
+                    msg_type = data.get("type") # For subscriptions or alternative command key
+                    # Map common actions sent via 'type' to 'command' for compatibility with frontend
+                    if not command and isinstance(msg_type, str) and msg_type in (
+                        "upload_firmware_start",
+                        "firmware_data_chunk",
+                        "upload_firmware_end",
+                        "get_firmware_version",
+                        "upgrade_signal",
+                    ):
+                        command = msg_type
                     robot_alias = data.get("robot_alias")
+                    if not robot_alias:
+                        robot_alias = data.get("robot_ip")  # Allow using IP as alias for all commands
 
                     if command == "subscribe":
                         data_type_to_sub = msg_type
@@ -1042,6 +1251,36 @@ class DirectBridge:
                         logger.info(f"{ws_identifier} subscribed to '{data_type_to_sub}' for '{display_target}' (Key: {actual_subscription_entity_key}) using 'subscribe' command.")
                         await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_sub, "subscribed_key": actual_subscription_entity_key, "robot_alias": target_alias}))
 
+                        # Immediately send snapshot for realtime_trajectory if requested
+                        if data_type_to_sub == "realtime_trajectory":
+                            # Resolve unique key from alias (IP)
+                            unique_robot_key = await self.get_robot_key_from_alias(target_alias)
+                            try:
+                                # Try to get current snapshot if robot was seen before
+                                snap = None
+                                if unique_robot_key:
+                                    snap = self.trajectory_calculator.get_snapshot(unique_robot_key)
+
+                                # If no snapshot exists yet, send a default empty snapshot
+                                if not snap:
+                                    snap = {
+                                        "position": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                                        "path": []
+                                    }
+
+                                snapshot_payload = {
+                                    "type": "realtime_trajectory",
+                                    "robot_ip": target_alias,
+                                    "robot_alias": target_alias,
+                                    "timestamp": time.time(),
+                                    "position": snap["position"],
+                                    "path": snap["path"],
+                                }
+                                await websocket.send(json.dumps(snapshot_payload))
+                                logger.info(f"Sent initial trajectory snapshot to {ws_identifier} for {target_alias} with {len(snap['path'])} points.")
+                            except Exception as e:
+                                logger.error(f"Error sending trajectory snapshot to {ws_identifier}: {e}")
+
                     elif command == "unsubscribe":
                         data_type_to_unsub = msg_type
                         target_alias = robot_alias
@@ -1074,7 +1313,7 @@ class DirectBridge:
                     
                     elif command == "clear_trajectory": # Handle new command
                         if robot_alias:
-                            unique_robot_key = self.get_robot_key_from_alias(robot_alias)
+                            unique_robot_key = await self.get_robot_key_from_alias(robot_alias)
                             if unique_robot_key and self.trajectory_calculator:
                                 logger.info(f"Received 'clear_trajectory' command for {robot_alias} (key: {unique_robot_key}) from {ws_identifier}")
                                 trajectory_update_result = self.trajectory_calculator.clear_path_history(unique_robot_key)
@@ -1082,10 +1321,11 @@ class DirectBridge:
                                 # Broadcast the cleared state immediately to all subscribers of this robot
                                 if trajectory_update_result:
                                     # Determine robot_ip for the message (you might need a helper for this)
-                                    robot_ip_for_message = "N/A" # Placeholder
-                                    alias_to_ip_map = await self.robot_alias_manager.get_alias_to_ip_map()
-                                    if robot_alias in alias_to_ip_map:
-                                        robot_ip_for_message = alias_to_ip_map[robot_alias]
+                                    robot_ip_for_message = "N/A"
+                                    async with robot_alias_manager["lock"]:
+                                        ip_tmp = robot_alias_manager["alias_to_ip"].get(robot_alias)
+                                        if ip_tmp:
+                                            robot_ip_for_message = ip_tmp
                                     
                                     cleared_trajectory_message = {
                                         "type": "realtime_trajectory",
@@ -1101,6 +1341,219 @@ class DirectBridge:
                                 logger.warning(f"Could not clear trajectory for {robot_alias}: unknown alias or no trajectory calculator.")
                         else:
                             logger.warning(f"Received 'clear_trajectory' command without robot_alias from {ws_identifier}")
+                    
+                    # === Plaintext control commands mapping ===
+                    elif command == "start_robot":
+                        if robot_alias:
+                            ok = await self.send_text_command_by_alias(robot_alias, "Start Robot")
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                        else:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message":"Missing robot_alias"}))
+                    elif command == "start_position":
+                        if robot_alias:
+                            ok = await self.send_text_command_by_alias(robot_alias, "Start Position")
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                        else:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message":"Missing robot_alias"}))
+                    elif command == "emergency_stop":
+                        if robot_alias:
+                            ok = await self.send_text_command_by_alias(robot_alias, "EMERGENCY_STOP")
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                        else:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message":"Missing robot_alias"}))
+                    elif command == "vector_control":
+                        # expects: dot_x, dot_y, dot_theta, stop_time
+                        try:
+                            dot_x = float(data.get("dot_x", 0))
+                            dot_y = float(data.get("dot_y", 0))
+                            dot_theta = float(data.get("dot_theta", 0))
+                            stop_time = int(data.get("stop_time", 0))
+                            if not robot_alias:
+                                raise ValueError("Missing robot_alias")
+                            cmd_str = f"dot_x:{dot_x} dot_y:{dot_y} dot_theta:{dot_theta} stop_time:{stop_time}"
+                            ok = await self.send_text_command_by_alias(robot_alias, cmd_str)
+                            # Update trajectory from control command too (in case no encoder yet)
+                            unique_key_for_ctrl = await self.get_robot_key_from_alias(robot_alias)
+                            if unique_key_for_ctrl:
+                                ctrl_result = self.trajectory_calculator.update_control_command(
+                                    unique_key_for_ctrl,
+                                    vx_robot=dot_x,
+                                    vy_robot=dot_y,
+                                    omega=dot_theta,
+                                    timestamp=time.time(),
+                                )
+                                if isinstance(ctrl_result, dict) and isinstance(ctrl_result.get("position"), dict) and isinstance(ctrl_result.get("path"), list):
+                                    ctrl_traj_payload = {
+                                        "type": "realtime_trajectory",
+                                        "robot_ip": robot_alias,
+                                        "robot_alias": robot_alias,
+                                        "timestamp": time.time(),
+                                        "position": ctrl_result["position"],
+                                        "path": ctrl_result["path"],
+                                    }
+                                    await self.broadcast_to_subscribers(robot_alias, ctrl_traj_payload)
+                                    # And status
+                                    robot_status_payload = self.build_robot_status_snapshot(unique_key_for_ctrl, robot_alias, robot_alias)
+                                    await self.broadcast_to_subscribers(robot_alias, robot_status_payload)
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
+                    elif command == "position_control":
+                        # expects: x, y, vel
+                        try:
+                            pos_x = float(data.get("x"))
+                            pos_y = float(data.get("y"))
+                            vel = float(data.get("vel"))
+                            if not robot_alias:
+                                raise ValueError("Missing robot_alias")
+                            cmd_str = f"x:{pos_x} y:{pos_y} vel:{vel}"
+                            ok = await self.send_text_command_by_alias(robot_alias, cmd_str)
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
+                    elif command == "motor_speed":
+                        # expects: motor_id (1..3), speed (int)
+                        try:
+                            motor_id = int(data.get("motor_id"))
+                            motor_speed = int(data.get("speed"))
+                            if not robot_alias:
+                                raise ValueError("Missing robot_alias")
+                            cmd_str = f"MOTOR_{motor_id}_SPEED:{motor_speed};"
+                            ok = await self.send_text_command_by_alias(robot_alias, cmd_str)
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
+                    elif command == "set_pid":
+                        # expects: motor_id, kp, ki, kd
+                        try:
+                            motor_id = int(data.get("motor_id"))
+                            kp = float(data.get("kp"))
+                            ki = float(data.get("ki"))
+                            kd = float(data.get("kd"))
+                            if not robot_alias:
+                                raise ValueError("Missing robot_alias")
+                            cmd_str = f"MOTOR:{motor_id} Kp:{kp} Ki:{ki} Kd:{kd}"
+                            ok = await self.send_text_command_by_alias(robot_alias, cmd_str)
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
+                    elif command == "upload_firmware_start":
+                        try:
+                            target_ip = data.get("robot_ip")
+                            filename = data.get("filename")
+                            filesize = int(data.get("filesize", 0))
+                            if not target_ip or not filename or filesize <= 0:
+                                raise ValueError("Missing robot_ip, filename or invalid filesize")
+                            self.fw_upload_mgr.start(target_ip, filename, filesize)
+                            await websocket.send(json.dumps({
+                                "type": "firmware_status",
+                                "status": "ok",
+                                "robot_ip": target_ip,
+                                "message": "Upload initialized"
+                            }))
+                        except Exception as e:
+                            await websocket.send(json.dumps({
+                                "type": "firmware_status",
+                                "status": "error",
+                                "message": str(e)
+                            }))
+                    elif command == "firmware_data_chunk":
+                        try:
+                            target_ip = data.get("robot_ip")
+                            b64_chunk = data.get("data")
+                            chunk_index = int(data.get("chunk_index", 0))
+                            total_chunks = int(data.get("total_chunks", 0))
+                            if not target_ip or not b64_chunk:
+                                raise ValueError("Missing robot_ip or data chunk")
+                            received = self.fw_upload_mgr.add_chunk(target_ip, b64_chunk)
+                            await websocket.send(json.dumps({
+                                "type": "firmware_chunk_ack",
+                                "robot_ip": target_ip,
+                                "chunk_index": chunk_index,
+                                "total_chunks": total_chunks,
+                                "received": received
+                            }))
+                        except Exception as e:
+                            await websocket.send(json.dumps({
+                                "type": "firmware_status",
+                                "status": "error",
+                                "message": str(e)
+                            }))
+                    elif command == "upload_firmware_end":
+                        try:
+                            target_ip = data.get("robot_ip")
+                            if not target_ip:
+                                raise ValueError("Missing robot_ip")
+                            saved_path = self.fw_upload_mgr.finish(target_ip)
+                            if not saved_path:
+                                raise RuntimeError("Firmware aggregation failed or size mismatch")
+                            # Prepare OTA server to send to this IP on next OTA connection
+                            self.ota_connection.firmware_to_send_path = saved_path
+                            self.ota_connection.ota_server_robot_ip_target = target_ip
+                            await websocket.send(json.dumps({
+                                "type": "firmware_prepared_for_ota",
+                                "robot_ip": target_ip,
+                                "ota_port": self.ota_port_arg,
+                                "firmware_size": os.path.getsize(saved_path)
+                            }))
+                        except Exception as e:
+                            await websocket.send(json.dumps({
+                                "type": "firmware_status",
+                                "status": "error",
+                                "message": str(e)
+                            }))
+                    elif command == "load_pid_config":
+                        # expects: robot_ip (preferred). Fall back to robot_alias if provided
+                        try:
+                            target_ip = data.get("robot_ip") or data.get("robot_alias")
+                            if not target_ip:
+                                raise ValueError("Missing robot_ip")
+                            loaded = await self.load_pid_config_from_file(target_ip)
+                            if loaded:
+                                await websocket.send(json.dumps({
+                                    "type": "pid_config_response",
+                                    "status": "loaded",
+                                    "pids": loaded,
+                                    "robot_ip": target_ip
+                                }))
+                            else:
+                                await websocket.send(json.dumps({
+                                    "type": "pid_config_response",
+                                    "status": "error",
+                                    "message": f"Could not load PID config from '{self.pid_config_file}'",
+                                    "robot_ip": target_ip
+                                }))
+                        except Exception as e:
+                            await websocket.send(json.dumps({
+                                "type": "pid_config_response",
+                                "status": "error",
+                                "message": str(e)
+                            }))
+                    elif command in ("upgrade", "upgrade_signal"):
+                        # Trigger OTA switch on device to connect to OTA server
+                        if robot_alias:
+                            ok = await self.send_upgrade_command_by_alias(robot_alias)
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                            await broadcast_to_all_ui({
+                                "type": "firmware_status",
+                                "status": "sent",
+                                "robot_ip": robot_alias,
+                                "message": "Upgrade command sent (raw + newline)"
+                            })
+                        else:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message":"Missing robot_alias"}))
+                    elif command == "get_robot_status":
+                        try:
+                            target_ip = data.get("robot_ip") or data.get("robot_alias")
+                            if not target_ip:
+                                raise ValueError("Missing robot_ip")
+                            unique_key = await self.get_robot_key_from_alias(target_ip)
+                            if not unique_key:
+                                raise ValueError("Robot not connected")
+                            payload = self.build_robot_status_snapshot(unique_key, target_ip, target_ip)
+                            await websocket.send(json.dumps(payload))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type": "error", "command": command, "message": str(e)}))
                     
                     # ... (other potential commands like 'get_pid', 'set_pid', etc.) ...
 

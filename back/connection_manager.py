@@ -1,5 +1,4 @@
-import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any
 import logging
 
 # Configure logging
@@ -94,7 +93,7 @@ class ConnectionManager:
     
     @classmethod
     def get_tcp_client(cls, robot_id: str):
-        """Get TCP client for a robot"""
+        """Get TCP client (reader, writer) for a robot"""
         robot_id = cls.normalize_robot_id(robot_id)
         
         if robot_id in cls._tcp_clients:

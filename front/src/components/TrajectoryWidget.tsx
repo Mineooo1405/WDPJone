@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useContext } from 'react';
 import { Chart as ChartJS, LineController, LineElement, PointElement, LinearScale, Title, Tooltip, Legend, CategoryScale } from 'chart.js';
 import zoomPlugin from 'chartjs-plugin-zoom';
-import { useRobotContext } from './RobotContext'; 
+import { useRobotContext, ReadyState } from './RobotContext'; 
 import { GlobalAppContext } from '../contexts/GlobalAppContext'; 
 import { RotateCcw, Maximize } from 'lucide-react';
 import WidgetConnectionHeader from './WidgetConnectionHeader';
@@ -31,7 +31,7 @@ interface RobotPose extends TrajectoryPoint {}
 
 const MAX_PATH_POINTS_DISPLAY = 500; // Max points to keep in the chart for performance
 
-const TrajectoryWidget: React.FC = () => {
+const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
   const { firmwareUpdateMode } = useContext(GlobalAppContext);
 
@@ -122,7 +122,7 @@ const TrajectoryWidget: React.FC = () => {
     const robotIdToManage = selectedRobotId; // The robot we intend to track
     const currentlyTrackedRobot = subscribedToRobotRef.current; // The robot we are currently subscribed to
 
-    if (robotIdToManage && readyState === WebSocket.OPEN) {
+    if (robotIdToManage && readyState === ReadyState.OPEN) {
       // We want to track a robot, and WebSocket is open.
       if (currentlyTrackedRobot !== robotIdToManage) {
         // If we are not tracking any robot, or tracking a different one, we need to switch.
@@ -171,7 +171,7 @@ const TrajectoryWidget: React.FC = () => {
       const robotAtCleanup = subscribedToRobotRef.current;
       // Only unsubscribe if actually subscribed and WS was open during effect's main run.
       // Rely on readyState from the effect's closure.
-      if (robotAtCleanup && readyState === WebSocket.OPEN) { 
+      if (robotAtCleanup && readyState === ReadyState.OPEN) { 
         sendJsonMessage({
           command: "unsubscribe",
           type: "realtime_trajectory",
@@ -184,107 +184,77 @@ const TrajectoryWidget: React.FC = () => {
     };
   }, [selectedRobotId, readyState, sendJsonMessage, widgetError]);
 
-  // Effect to update the chart when path or pose changes
+  // Initialize chart once on mount
   useEffect(() => {
     if (!canvasRef.current) return;
-
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
-
-    if (chartRef.current) {
-      chartRef.current.data.datasets[0].data = currentPath;
-      // Optionally, add current pose as a distinct point if needed
-      // chartRef.current.data.datasets[1].data = currentPose ? [currentPose] : [];
-      chartRef.current.update('none'); // 'none' for no animation, 'quiet' might also work
-    } else {
-      chartRef.current = new ChartJS(ctx, {
-        type: 'line', // Changed from 'scatter' to 'line'
-        data: {
-          datasets: [
-            {
-              label: 'Robot Path',
-              data: currentPath,
-              borderColor: 'rgb(54, 162, 235)', // Color of the line
-              fill: false, // Do not fill the area under the line
-              borderWidth: 2, // Thickness of the line
-              pointRadius: 2, // Size of the points
-              pointBackgroundColor: 'rgb(54, 162, 235)', // Color of the points
-              tension: 0.1, // Slight curve to the line (0 for straight lines)
-              // showLine: true, // Implicitly true for type: 'line', can be omitted
-            },
-            // {
-            //   label: 'Current Pose',
-            //   data: currentPose ? [currentPose] : [],
-            //   borderColor: 'rgb(255, 99, 132)',
-            //   backgroundColor: 'rgba(255, 99, 132, 1)',
-            //   pointRadius: 5,
-            //   pointStyle: 'triangle',
-            //   rotation: currentPose?.theta ? (currentPose.theta * 180 / Math.PI) : 0,
-            //   showLine: false,
-            // }
-          ],
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false, // Disable animation for real-time updates
-          scales: {
-            x: {
-              type: 'linear',
-              position: 'bottom',
-              title: {
-                display: true,
-                text: 'X (meters)',
-                color: '#CCC'
-              },
-              grid: { color: 'rgba(255,255,255,0.1)' },
-              ticks: { color: '#AAA' },
-            },
-            y: {
-              type: 'linear',
-              title: {
-                display: true,
-                text: 'Y (meters)',
-                color: '#CCC'
-              },
-              grid: { color: 'rgba(255,255,255,0.1)' },
-              ticks: { color: '#AAA' },
-            },
+    chartRef.current = new ChartJS(ctx, {
+      type: 'line',
+      data: {
+        datasets: [
+          {
+            label: 'Robot Path',
+            data: [],
+            borderColor: 'rgb(54, 162, 235)',
+            fill: false,
+            borderWidth: 2,
+            pointRadius: 2,
+            pointBackgroundColor: 'rgb(54, 162, 235)',
+            tension: 0.1,
           },
-          plugins: {
-            legend: {
-              position: 'top' as const,
-              labels: { color: '#CCC' }
-            },
-            tooltip: {
-              callbacks: {
-                label: function (context) {
-                  const point = context.raw as TrajectoryPoint;
-                  let label = `X: ${point.x.toFixed(2)}, Y: ${point.y.toFixed(2)}`;
-                  if (point.theta !== undefined) {
-                    label += `, Theta: ${(point.theta * 180 / Math.PI).toFixed(1)}°`;
-                  }
-                  return label;
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        scales: {
+          x: {
+            type: 'linear',
+            position: 'bottom',
+            title: { display: true, text: 'X (meters)', color: '#CCC' },
+            grid: { color: 'rgba(255,255,255,0.1)' },
+            ticks: { color: '#AAA' },
+          },
+          y: {
+            type: 'linear',
+            title: { display: true, text: 'Y (meters)', color: '#CCC' },
+            grid: { color: 'rgba(255,255,255,0.1)' },
+            ticks: { color: '#AAA' },
+          },
+        },
+        plugins: {
+          legend: { position: 'top' as const, labels: { color: '#CCC' } },
+          tooltip: {
+            callbacks: {
+              label: function (context) {
+                const point = context.raw as TrajectoryPoint;
+                let label = `X: ${point.x.toFixed(2)}, Y: ${point.y.toFixed(2)}`;
+                if (point.theta !== undefined) {
+                  label += `, Theta: ${(point.theta * 180 / Math.PI).toFixed(1)}°`;
                 }
+                return label;
               }
-            },
-            zoom: {
-              pan: { enabled: true, mode: 'xy' as const },
-              zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'xy' as const },
-            },
+            }
           },
-          // Ensure aspect ratio is equal for a proper trajectory map
-          aspectRatio: 1, 
+          zoom: { pan: { enabled: true, mode: 'xy' as const }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'xy' as const } },
         },
-      });
-    }
-
-    // Cleanup chart instance on component unmount
+        aspectRatio: 1,
+      },
+    });
     return () => {
       chartRef.current?.destroy();
       chartRef.current = null;
     };
-  }, [currentPath, currentPose]); // Re-run when path or pose changes
+  }, []);
+
+  // Update chart data when path changes
+  useEffect(() => {
+    if (!chartRef.current) return;
+    chartRef.current.data.datasets[0].data = currentPath as any;
+    chartRef.current.update('none');
+  }, [currentPath]);
 
   const resetZoom = () => chartRef.current?.resetZoom();
   const clearPath = () => {
@@ -331,7 +301,7 @@ const TrajectoryWidget: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col h-full p-3 bg-gray-800 text-gray-200 rounded-lg shadow-xl">
+    <div className={`flex flex-col h-full ${compact ? 'p-2' : 'p-3'} bg-gray-800 text-gray-200 rounded-lg shadow-xl`}>
       <WidgetConnectionHeader
         title={`Real-time Trajectory (${selectedRobotId || 'No Robot'})`}
         statusTextOverride={derivedStatusText}
@@ -339,22 +309,24 @@ const TrajectoryWidget: React.FC = () => {
         error={widgetError}
       />
 
-      <div className="flex gap-2 mb-2 items-center flex-wrap">
-        <button
-          onClick={resetZoom}
-          className="px-3 py-1.5 bg-blue-600 text-white rounded-md flex items-center gap-1 hover:bg-blue-700 disabled:opacity-50 text-xs"
-          disabled={!selectedRobotId || firmwareUpdateMode}
-        >
-          <Maximize size={14} /> Reset Zoom
-        </button>
-        <button
-          onClick={clearPath}
-          className="px-3 py-1.5 bg-red-600 text-white rounded-md flex items-center gap-1 hover:bg-red-700 disabled:opacity-50 text-xs"
-          disabled={!selectedRobotId || firmwareUpdateMode}
-        >
-          <RotateCcw size={14} /> Clear Path
-        </button>
-      </div>
+      {!compact && (
+        <div className="flex gap-2 mb-2 items-center flex-wrap">
+          <button
+            onClick={resetZoom}
+            className="px-3 py-1.5 bg-blue-600 text-white rounded-md flex items-center gap-1 hover:bg-blue-700 disabled:opacity-50 text-xs"
+            disabled={!selectedRobotId || firmwareUpdateMode}
+          >
+            <Maximize size={14} /> Reset Zoom
+          </button>
+          <button
+            onClick={clearPath}
+            className="px-3 py-1.5 bg-red-600 text-white rounded-md flex items-center gap-1 hover:bg-red-700 disabled:opacity-50 text-xs"
+            disabled={!selectedRobotId || firmwareUpdateMode}
+          >
+            <RotateCcw size={14} /> Clear Path
+          </button>
+        </div>
+      )}
 
       {widgetError && (
         <div className="bg-red-100 border border-red-400 text-red-700 px-3 py-2 rounded relative mb-2 text-xs" role="alert">
@@ -363,7 +335,7 @@ const TrajectoryWidget: React.FC = () => {
         </div>
       )}
 
-      <div className="flex-grow relative w-full h-64 md:h-auto min-h-[300px]">
+      <div className={`flex-grow relative w-full ${compact ? 'h-56 min-h-[220px]' : 'h-64 md:h-auto min-h-[300px]'}`}>
         {firmwareUpdateMode ? (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-700 bg-opacity-80">
             <p className="text-lg font-semibold">Trajectory view disabled during Firmware Update.</p>

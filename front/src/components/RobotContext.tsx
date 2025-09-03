@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useState, ReactNode, useEffect, useCallback } from "react";
 import useWebSocket, { ReadyState } from 'react-use-websocket';
 
-// Define the WebSocket URL (direct_bridge.py default)
-const WEBSOCKET_URL = process.env.REACT_APP_WEBSOCKET_URL || 'ws://localhost:9003';
+// Define the WebSocket URL (align with start.py writes REACT_APP_WS_BRIDGE_URL)
+const WEBSOCKET_URL = process.env.REACT_APP_WS_BRIDGE_URL || 'ws://localhost:9003';
 
 // Define the structure for a robot entry
 export interface ConnectedRobot {
@@ -72,12 +72,12 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
     if (lastJsonMessage) {
       const message = lastJsonMessage as any;
 
-      if ((message.type === 'connected_robots_list' || message.type === 'initial_robot_list') && message.robots) {
+      if ((message.type === 'available_robots_initial_list' || message.type === 'connected_robots_list' || message.type === 'initial_robot_list') && message.robots) {
         console.log(`RobotContext: Received ${message.type} from backend`, message.robots);
         const newRobots: ConnectedRobot[] = Array.isArray(message.robots) ? message.robots.map((r: any) => ({
-          alias: r.alias,
-          ip: r.ip,
-          key: r.key || r.unique_key,
+          alias: r.alias || r.ip, // backend now uses IP as alias
+          ip: r.ip || r.alias,
+          key: r.key || r.unique_key || r.robot_id,
           status: r.status
         })) : [];
 

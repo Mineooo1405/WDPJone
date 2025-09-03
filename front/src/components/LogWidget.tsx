@@ -101,17 +101,17 @@ const LogWidget: React.FC = () => {
     setWidgetError(null);
 
     if (newSubscribedState) {
-      console.log(`LogWidget: Subscribing to log_data for alias ${selectedRobotId}`);
+      console.log(`LogWidget: Subscribing to log for alias ${selectedRobotId}`);
       sendJsonMessage({
-        command: "direct_subscribe",
+        command: "subscribe",
         type: "log",
         robot_alias: selectedRobotId
       });
       setLogs([]);
     } else {
-      console.log(`LogWidget: Unsubscribing from log_data for alias ${selectedRobotId}`);
+      console.log(`LogWidget: Unsubscribing from log for alias ${selectedRobotId}`);
       sendJsonMessage({
-        command: "direct_unsubscribe",
+        command: "unsubscribe",
         type: "log",
         robot_alias: selectedRobotId
       });
@@ -121,9 +121,9 @@ const LogWidget: React.FC = () => {
   useEffect(() => {
     if (selectedRobotId && readyState === ReadyState.OPEN) {
       if (isSubscribed) {
-        console.log(`LogWidget: Re-subscribing to log_data for new alias ${selectedRobotId}`);
+        console.log(`LogWidget: Re-subscribing to log for new alias ${selectedRobotId}`);
         sendJsonMessage({
-          command: "direct_subscribe",
+          command: "subscribe",
           type: "log",
           robot_alias: selectedRobotId
         });
@@ -133,9 +133,9 @@ const LogWidget: React.FC = () => {
 
     return () => {
       if (selectedRobotId && readyState === ReadyState.OPEN && isSubscribed) { 
-        console.log(`LogWidget: Unsubscribing from log_data for alias ${selectedRobotId} on cleanup/change`);
+        console.log(`LogWidget: Unsubscribing from log for alias ${selectedRobotId} on cleanup/change`);
         sendJsonMessage({
-          command: "direct_unsubscribe",
+          command: "unsubscribe",
           type: "log",
           robot_alias: selectedRobotId
         });

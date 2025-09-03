@@ -7,7 +7,7 @@ from pathlib import Path
 import threading
 import queue
 import tkinter as tk
-from tkinter import scrolledtext, Frame, Label, Button, Toplevel, messagebox
+from tkinter import scrolledtext, Frame, Label, Button, messagebox
 from tkinter.constants import END, BOTH, X, Y, TOP, BOTTOM, LEFT, RIGHT, W, E, N, S
 import re # Added for regex parsing
 
@@ -236,8 +236,7 @@ def start_servers(stop_event_ref):
     project_root_dir = current_script_dir.parent 
     frontend_dir = project_root_dir / "front"
 
-    output_queue.put(("System-DEBUG", f"Type of backend_dir: {type(backend_dir)}, Value: {backend_dir}"))
-    output_queue.put(("System-DEBUG", f"Type of frontend_dir: {type(frontend_dir)}, Value: {frontend_dir}"))
+    # Debug logs removed for cleanliness
 
     if not backend_dir.is_dir():
         output_queue.put(("System-ERR", f"Backend directory not found at {backend_dir}"))
@@ -249,16 +248,20 @@ def start_servers(stop_event_ref):
     check_and_create_frontend_env(frontend_dir)
 
     # --- Proactively clear known critical ports before starting servers ---
-    output_queue.put(("System", "Attempting to pre-clear known critical ports..."))
-    ports_to_pre_clear = [
-        DIRECT_BRIDGE_TCP_PORT,
-        DIRECT_BRIDGE_OTA_PORT,
-        DEFAULT_WS_BRIDGE_PORT, # direct_bridge.py also uses this
-        FRONTEND_DEV_PORT       # For the frontend server
-    ]
-    for port_num in ports_to_pre_clear:
-        force_close_port(port_num, output_queue)
-    output_queue.put(("System", "Pre-clearing of ports attempt finished."))
+    do_preclear = os.environ.get("BRIDGE_PORT_PRECLEAR", "1").lower() not in ("0", "false", "no")
+    if do_preclear:
+        output_queue.put(("System", "Attempting to pre-clear known critical ports..."))
+        ports_to_pre_clear = [
+            DIRECT_BRIDGE_TCP_PORT,
+            DIRECT_BRIDGE_OTA_PORT,
+            DEFAULT_WS_BRIDGE_PORT, # direct_bridge.py also uses this
+            FRONTEND_DEV_PORT       # For the frontend server
+        ]
+        for port_num in ports_to_pre_clear:
+            force_close_port(port_num, output_queue)
+        output_queue.put(("System", "Pre-clearing of ports attempt finished."))
+    else:
+        output_queue.put(("System", "Port pre-clear skipped (BRIDGE_PORT_PRECLEAR disabled)."))
     # --- End of proactive port clearing ---
 
     output_queue.put(("System", "Starting backend server (direct_bridge.py)..."))

@@ -1,14 +1,23 @@
 {
-    "C_Cpp.intelliSenseEngine": "default",
-    "idf.espIdfPathWin": "d:\\IDF\\esp-idf\\v5.2.2\\esp-idf",
-    "idf.openOcdConfigs": [
-        "board/esp32-wrover-kit-3.3v.cfg"
-    ],
-    "idf.toolsPathWin": "D:\\APP\\Espressif",
-    "idf.flashType": "UART",
-    "idf.portWin": "COM7",
-    "files.associations": {
-        "esp_log.h": "c"
-    },
-    "idf.pythonInstallPath": "D:\\APP\\Espressif\\tools\\idf-python\\3.11.2\\python.exe"
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.espIdfPathWin": "C:\\Users\\nhatm\\esp\\v5.2.5\\esp-idf",
+  "idf.openOcdConfigs": [
+    "board/esp32-wrover-kit-3.3v.cfg"
+  ],
+  "idf.toolsPathWin": "C:\\Users\\nhatm\\.espressif",
+  "idf.flashType": "UART",
+  "idf.portWin": "COM3",
+  "files.associations": {
+    "esp_log.h": "c"
+  },
+  "idf.pythonInstallPath": "C:\\Users\\nhatm\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32"
+  },
+  "clangd.path": "C:\\Users\\nhatm\\.espressif\\tools\\esp-clang\\16.0.1-fe4f10a809\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=C:\\Users\\nhatm\\.espressif\\tools\\xtensa-esp-elf\\esp-13.2.0_20230928\\xtensa-esp-elf\\bin\\xtensa-esp32-elf-gcc.exe",
+    "--compile-commands-dir=f:\\WDPJone\\Robot_code\\Omni\\OTA0_FirwareUpdate\\build"
+  ]
 }

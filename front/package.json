@@ -25,7 +25,7 @@
     "utility-types": "^3.11.0"
   },
   "scripts": {
-    "start": "FAST_REFRESH=false NODE_OPTIONS=--openssl-legacy-provider react-scripts start",
+    "start": "set FAST_REFRESH=false && set NODE_OPTIONS=--openssl-legacy-provider && react-scripts start",
     "build": "set NODE_OPTIONS=--openssl-legacy-provider && react-scripts build",
     "test": "set NODE_OPTIONS=--openssl-legacy-provider && react-scripts test",
     "eject": "react-scripts eject",

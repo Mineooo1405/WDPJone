@@ -124,15 +124,12 @@ const PIDControlWidget: React.FC = () => {
     setStatusMessage(null);
     
     sendJsonMessage({
-      command: "send_to_robot",
-      robot_ip: targetRobotIp,
-      payload: {
-        type: "pid_values",
-        motor: motorId,
-        kp: pidValues.kp,
-        ki: pidValues.ki,
-        kd: pidValues.kd
-      }
+      command: "set_pid",
+      robot_alias: targetRobotIp,
+      motor_id: motorId,
+      kp: pidValues.kp,
+      ki: pidValues.ki,
+      kd: pidValues.kd
     });
     // Confirmation will be handled by lastJsonMessage effect
   };

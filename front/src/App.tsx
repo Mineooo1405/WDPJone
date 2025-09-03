@@ -4,14 +4,12 @@ import MainArea from "./components/MainArea";
 import ConnectionStatusWidget from "./components/ConnectionStatusWidget";
 import { DndProvider } from "react-dnd";
 import { HTML5Backend } from "react-dnd-html5-backend";
-import { PlusCircle, Layers, Settings, MonitorSmartphone, ActivitySquare, 
-         WifiOff, Code, ChevronLeft, ChevronRight, Cpu, BarChart3, Activity, Gamepad, Terminal,
-         TestTubeDiagonal
+import { PlusCircle, Settings, MonitorSmartphone, ActivitySquare, 
+         WifiOff, Code, ChevronLeft, ChevronRight, Cpu, BarChart3, Activity, Gamepad, Terminal
        } from "lucide-react";
 import DraggableWidget from "./components/DraggableWidget";
 import { GlobalAppProvider } from "./contexts/GlobalAppContext";
 import LogWidget from './components/LogWidget';
-import RobotStatusWidget from './components/RobotStatusWidget';
 import GlobalRobotSelector from './components/GlobalRobotSelector';
 import IMUWidget from './components/IMUWidget';
 import EncoderDataWidget from './components/EncoderDataWidget';
@@ -20,6 +18,7 @@ import FirmwareUpdateWidget from './components/FirmwareUpdateWidget';
 import RobotControlWidget from './components/RobotControlWidget';
 import TrajectoryWidget from './components/TrajectoryWidget';
 import WidgetDataSimulator from './components/WidgetDataSimulator';
+import SimpleDashboard from './components/SimpleDashboard';
 
 // Widget option definition
 interface WidgetOption {
@@ -41,7 +40,6 @@ export interface WidgetInstance {
 }
 
 const widgetComponents: { [key: string]: React.FC<any> } = {
-  "robot-status": RobotStatusWidget,
   "robot-control": RobotControlWidget,
   "pid-control": PIDControlWidget,
   "trajectory": TrajectoryWidget,
@@ -57,24 +55,25 @@ export { widgetComponents };
 
 const App: React.FC = () => {
   const [showTester, setShowTester] = useState(false);
-  const [debugMode, setDebugMode] = useState(false);
+  // const [debugMode] = useState(false);
   const [showSimulator, setShowSimulator] = useState(false);
   const [collapseSidebar, setCollapseSidebar] = useState(false);
-  const [connectionErrors, setConnectionErrors] = useState<string[]>([]);
+  // const [connectionErrors] = useState<string[]>([]);
   const [activeCategory, setActiveCategory] = useState<string | null>("control");
+  const [layoutMode, setLayoutMode] = useState<'simple' | 'custom'>(() => {
+    try {
+      const saved = localStorage.getItem('layoutMode');
+      return (saved === 'custom' || saved === 'simple') ? saved : 'simple';
+    } catch {
+      return 'simple';
+    }
+  });
   
   // Widget instances that have been placed on the dashboard
   const [widgetInstances, setWidgetInstances] = useState<WidgetInstance[]>([]);
   
   // Widget options that can be dragged to main area
   const widgetOptions = useMemo(() => [
-    {
-      id: "robot-status",
-      name: "Trạng Thái Robot",
-      description: "Hiển thị thông tin trạng thái tổng hợp của robot",
-      icon: <ActivitySquare size={20} />,
-      category: "monitoring"
-    },
     {
       id: "robot-control",
       name: "Điều Khiển Robot",
@@ -227,10 +226,9 @@ const App: React.FC = () => {
   }, [widgetOptions, handleWidgetDrop]);
 
   // Thêm vào trong App.tsx, bên trong hàm App
-  // Thiết lập một số widget mặc định khi ứng dụng khởi động
+  // Thiết lập một số widget mặc định khi ứng dụng khởi động (chỉ ở chế độ Tùy biến)
   useEffect(() => {
-    // Chỉ thêm widget mặc định nếu dashboard đang trống
-    if (widgetInstances.length === 0) {
+    if (layoutMode === 'custom' && widgetInstances.length === 0) {
       setWidgetInstances([
         {
           id: `robot-status-${Date.now()}`,
@@ -255,30 +253,37 @@ const App: React.FC = () => {
         },
       ]);
     }
-  }, []);
+  }, [layoutMode]);
 
-  // Lưu trạng thái dashboard vào localStorage
+  // Lưu trạng thái dashboard vào localStorage (chỉ chế độ Tùy biến)
   useEffect(() => {
-    if (widgetInstances.length > 0) {
+    if (layoutMode === 'custom') {
       try {
         localStorage.setItem('dashboardWidgets', JSON.stringify(widgetInstances));
       } catch (error) {
         console.error("Error saving dashboard state:", error);
       }
     }
-  }, [widgetInstances]);
+  }, [widgetInstances, layoutMode]);
 
-  // Khôi phục trạng thái dashboard từ localStorage khi khởi động
+  // Khôi phục trạng thái dashboard từ localStorage khi khởi động (chỉ chế độ Tùy biến)
   useEffect(() => {
     try {
       const savedWidgets = localStorage.getItem('dashboardWidgets');
-      if (savedWidgets) {
+      if (layoutMode === 'custom' && savedWidgets) {
         setWidgetInstances(JSON.parse(savedWidgets));
       }
     } catch (error) {
       console.error("Error restoring dashboard state:", error);
     }
-  }, []);
+  }, [layoutMode]);
+
+  // Lưu chế độ giao diện
+  useEffect(() => {
+    try {
+      localStorage.setItem('layoutMode', layoutMode);
+    } catch {}
+  }, [layoutMode]);
 
   return (
     <GlobalAppProvider>
@@ -293,6 +298,14 @@ const App: React.FC = () => {
               </div>
               <div className="flex items-center gap-4">
                 <GlobalRobotSelector />
+                <div className="hidden sm:block text-sm opacity-80">Chế độ:</div>
+                <button
+                  onClick={() => setLayoutMode(prev => prev === 'simple' ? 'custom' : 'simple')}
+                  className="bg-white text-blue-700 px-3 py-1.5 rounded-md shadow hover:bg-blue-50 text-sm"
+                  title="Chuyển giữa bố cục Đơn giản và Tùy biến"
+                >
+                  {layoutMode === 'simple' ? 'Đơn giản' : 'Tùy biến'}
+                </button>
               </div>
             </div>
             
@@ -306,78 +319,84 @@ const App: React.FC = () => {
               </div>
             )} */}
             
-            {/* Main Content with Sidebar and Drop Area */}
-            <div className="flex-grow flex overflow-hidden">
-              {/* Sidebar */}
-              <div className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out
-                ${collapseSidebar ? "w-16" : "w-64"}`}>
-                
-                {/* Sidebar Header */}
-                <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-                  {!collapseSidebar && <h2 className="font-semibold">Widget Library</h2>}
-                  <button 
-                    onClick={toggleSidebar}
-                    className="p-1 rounded-md hover:bg-gray-100 ml-auto text-gray-500"
-                  >
-                    {collapseSidebar ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
-                  </button>
-                </div>
-                
-                {/* Category Selection */}
-                <div className={`flex ${collapseSidebar ? "flex-col p-2" : "p-2 gap-1"}`}>
-                  <button 
-                    onClick={() => setActiveCategory("control")}
-                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2
-                      ${activeCategory === "control" 
-                        ? "bg-blue-100 text-blue-700" 
-                        : "text-gray-600 hover:bg-gray-100"}`}
-                  >
-                    <ActivitySquare size={16} />
-                    {!collapseSidebar && <span>Control</span>}
-                  </button>
-                </div>
-                
-                {/* Widgets List */}
-                <div className="flex-grow overflow-auto p-3">
-                  {!collapseSidebar && <h3 className="text-xs uppercase text-gray-500 font-semibold mb-2">Available Widgets</h3>}
+            {/* Main Content */}
+            {layoutMode === 'simple' ? (
+              <div className="flex-grow overflow-hidden">
+                <SimpleDashboard />
+              </div>
+            ) : (
+              <div className="flex-grow flex overflow-hidden">
+                {/* Sidebar */}
+                <div className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out
+                  ${collapseSidebar ? "w-16" : "w-64"}`}>
                   
-                  <div className="space-y-2">
-                    {widgetOptions.map((widget) => (
-                      <DraggableWidget 
-                        key={widget.id}
-                        widget={widget as WidgetOption}
-                        collapsed={collapseSidebar}
-                      />
-                    ))}
-                  </div>
-                </div>
-                
-                {/* Add Widget Button */}
-                {!collapseSidebar && (
-                  <div className="p-3 border-t border-gray-200">
+                  {/* Sidebar Header */}
+                  <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+                    {!collapseSidebar && <h2 className="font-semibold">Widget Library</h2>}
                     <button 
-                      onClick={handleAddRandomWidget}
-                      className="w-full bg-blue-600 text-white rounded-md py-2 px-3 flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors"
+                      onClick={toggleSidebar}
+                      className="p-1 rounded-md hover:bg-gray-100 ml-auto text-gray-500"
                     >
-                      <PlusCircle size={16} />
-                      <span>Add Widget</span>
+                      {collapseSidebar ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
                     </button>
                   </div>
-                )}
+                  
+                  {/* Category Selection */}
+                  <div className={`flex ${collapseSidebar ? "flex-col p-2" : "p-2 gap-1"}`}>
+                    <button 
+                      onClick={() => setActiveCategory("control")}
+                      className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2
+                        ${activeCategory === "control" 
+                          ? "bg-blue-100 text-blue-700" 
+                          : "text-gray-600 hover:bg-gray-100"}`}
+                    >
+                      <ActivitySquare size={16} />
+                      {!collapseSidebar && <span>Control</span>}
+                    </button>
+                  </div>
+                  
+                  {/* Widgets List */}
+                  <div className="flex-grow overflow-auto p-3">
+                    {!collapseSidebar && <h3 className="text-xs uppercase text-gray-500 font-semibold mb-2">Available Widgets</h3>}
+                    
+                    <div className="space-y-2">
+                      {widgetOptions.map((widget) => (
+                        <DraggableWidget 
+                          key={widget.id}
+                          widget={widget as WidgetOption}
+                          collapsed={collapseSidebar}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* Add Widget Button */}
+                  {!collapseSidebar && (
+                    <div className="p-3 border-t border-gray-200">
+                      <button 
+                        onClick={handleAddRandomWidget}
+                        className="w-full bg-blue-600 text-white rounded-md py-2 px-3 flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors"
+                      >
+                        <PlusCircle size={16} />
+                        <span>Add Widget</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Main Drop Area */}
+                <div className="flex-grow overflow-auto">
+                  <MainArea 
+                    widgets={widgetInstances}
+                    onWidgetDrop={handleWidgetDrop}
+                    onRemoveWidget={handleRemoveWidget}
+                    onWidgetMove={handleWidgetMove}
+                    onWidgetResize={handleWidgetResize}
+                    onWidgetFocus={bringWidgetToFront}
+                  />
+                </div>
               </div>
-              
-              {/* Main Drop Area */}
-              <div className="flex-grow overflow-auto">
-                <MainArea 
-                  widgets={widgetInstances}
-                  onWidgetDrop={handleWidgetDrop}
-                  onRemoveWidget={handleRemoveWidget}
-                  onWidgetMove={handleWidgetMove}
-                  onWidgetResize={handleWidgetResize}
-                  onWidgetFocus={bringWidgetToFront}
-                />
-              </div>
-            </div>
+            )}
             
             {/* WebSocket Tester Overlay */}
             {showTester && (

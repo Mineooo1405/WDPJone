@@ -92,7 +92,7 @@ interface RobotCommandPayload {
   [key: string]: any; 
 }
 
-const RobotControlWidget: React.FC = () => {
+const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   const { selectedRobotId, connectedRobots } = useRobotContext();
   const { 
     sendMessage, 
@@ -105,7 +105,7 @@ const RobotControlWidget: React.FC = () => {
   const [rpmValues, setRpmValues] = useState<RPMData>({1: 0, 2: 0, 3: 0});
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [statusMessage, setStatusMessage] = useState<string>("");
-  const [activeTab, setActiveTab] = useState<'joystick' | 'motors' | 'keyboard'>('keyboard');
+  const [activeTab, setActiveTab] = useState<'joystick' | 'motors' | 'keyboard'>(compact ? 'keyboard' : 'keyboard');
   const [velocities, setVelocities] = useState({ x: 0, y: 0, theta: 0 });
   const [maxSpeed, setMaxSpeed] = useState(1.0); 
   const [maxAngular, setMaxAngular] = useState(2.0); 
@@ -150,10 +150,11 @@ const RobotControlWidget: React.FC = () => {
     setStatusMessage("Đang gửi lệnh...");
 
     const messageToSend = {
-      command: "send_to_robot",
-      robot_ip: currentSelectedIp,
-      robot_alias: selectedRobotId, 
-      payload: payloadForRobot 
+      // Map high-level payload types to backend plaintext commands
+      ...(payloadForRobot.type === 'motion' ? { command: 'vector_control', robot_alias: currentSelectedIp, dot_x: payloadForRobot.x, dot_y: payloadForRobot.y, dot_theta: payloadForRobot.theta, stop_time: 0 } : {}),
+      ...(payloadForRobot.type === 'motor_speed' ? { command: 'motor_speed', robot_alias: currentSelectedIp, motor_id: payloadForRobot.motor, speed: payloadForRobot.speed } : {}),
+      ...(payloadForRobot.type === 'emergency_stop' ? { command: 'emergency_stop', robot_alias: currentSelectedIp } : {}),
+      ...(payloadForRobot.type === 'pid_values' ? { command: 'set_pid', robot_alias: currentSelectedIp, motor_id: payloadForRobot.motor, kp: payloadForRobot.kp, ki: payloadForRobot.ki, kd: payloadForRobot.kd } : {}),
     };
     // console.log(`[RobotControlWidget] Sending command:`, messageToSend); // Bỏ comment nếu cần debug
     sendMessage(messageToSend);
@@ -574,35 +575,37 @@ const RobotControlWidget: React.FC = () => {
           </div>
       )}
 
-      <div className="flex-shrink-0 flex justify-between mb-4 border-b">
-        <div className="flex items-center gap-1">
-          <button 
-            onClick={() => setActiveTab('keyboard')}
-            className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'keyboard' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
-            disabled={!finalWidgetReady}
-          >
-            Keyboard
-          </button>
-          <button 
-            onClick={() => setActiveTab('joystick')}
-             className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'joystick' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
-             disabled={!finalWidgetReady}
-          >
-            Joystick
-          </button>
-          <button 
-            onClick={() => setActiveTab('motors')}
-             className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'motors' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
-             disabled={!finalWidgetReady}
-          >
-            Motors
-          </button>
+      {!compact && (
+        <div className="flex-shrink-0 flex justify-between mb-4 border-b">
+          <div className="flex items-center gap-1">
+            <button 
+              onClick={() => setActiveTab('keyboard')}
+              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'keyboard' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+              disabled={!finalWidgetReady}
+            >
+              Keyboard
+            </button>
+            <button 
+              onClick={() => setActiveTab('joystick')}
+              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'joystick' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+              disabled={!finalWidgetReady}
+            >
+              Joystick
+            </button>
+            <button 
+              onClick={() => setActiveTab('motors')}
+              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'motors' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+              disabled={!finalWidgetReady}
+            >
+              Motors
+            </button>
+          </div>
+          <div className="flex items-center px-3 py-2 text-sm text-gray-600">
+            Robot: {selectedRobotId || "Chưa chọn"}
+            {currentSelectedIp && ` (${currentSelectedIp})`}
+          </div>
         </div>
-        <div className="flex items-center px-3 py-2 text-sm text-gray-600">
-           Robot: {selectedRobotId || "Chưa chọn"}
-           {currentSelectedIp && ` (${currentSelectedIp})`}
-        </div>
-      </div>
+      )}
       
       {errorMessage && !webSocketError && (
         <div className="flex-shrink-0 bg-red-100 text-red-700 p-2 rounded-md text-sm mb-4">
@@ -680,7 +683,7 @@ const RobotControlWidget: React.FC = () => {
         </div>
       )}
       
-      {activeTab === 'joystick' && (
+      {!compact && activeTab === 'joystick' && (
         <div className={`mb-4 ${!finalWidgetReady ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''}`}>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                <div className="p-4 border rounded-lg text-center">
@@ -733,7 +736,7 @@ const RobotControlWidget: React.FC = () => {
         </div>
       )}
       
-      {activeTab === 'motors' && (
+      {!compact && activeTab === 'motors' && (
         <div className="mb-4">
             <h3 className="text-lg font-semibold mb-2">Điều Khiển Từng Động Cơ</h3>
              <div className="space-y-2">

@@ -61,12 +61,10 @@ interface RobotStatusPayload extends BaseMessagePayload {
   trajectory?: Trajectory;
 }
 
-interface TrajectoryDataPayload extends BaseMessagePayload {
-  type: 'trajectory_data' | 'trajectory_update' | 'trajectory_history_response';
-  current_x?: number;
-  current_y?: number;
-  current_theta?: number;
-  points?: { x: number[]; y: number[]; theta?: number[] };
+interface TrajectoryRealtimePayload extends BaseMessagePayload {
+  type: 'realtime_trajectory' | 'trajectory_history_response';
+  position?: { x: number; y: number; theta?: number };
+  path?: { x: number; y: number; theta?: number }[];
   status?: string;
   progress_percent?: number;
 }
@@ -155,19 +153,26 @@ const RobotStatusWidget: React.FC = () => {
   }, [selectedRobotId]);
 
   // Handler for trajectory messages
-  const handleTrajectoryUpdate = useCallback((data: TrajectoryDataPayload) => {
+  const handleTrajectoryUpdate = useCallback((data: TrajectoryRealtimePayload) => {
     if (data.robot_ip && data.robot_ip !== selectedRobotId) return;
 
-    setTrajectory(prev => ({
+    if (data.type === 'realtime_trajectory') {
+      const pos = data.position || { x: 0, y: 0, theta: 0 };
+      const pathList = Array.isArray(data.path) ? data.path : [];
+      const xs = pathList.map(p => p.x);
+      const ys = pathList.map(p => p.y);
+      const thetas = pathList.map(p => (typeof p.theta === 'number' ? p.theta : undefined)).filter(v => v !== undefined) as number[];
+      setTrajectory(prev => ({
         currentPosition: {
-        x: data.current_x ?? prev.currentPosition.x,
-        y: data.current_y ?? prev.currentPosition.y,
-        theta: data.current_theta ?? prev.currentPosition.theta,
+          x: typeof pos.x === 'number' ? pos.x : prev.currentPosition.x,
+          y: typeof pos.y === 'number' ? pos.y : prev.currentPosition.y,
+          theta: typeof pos.theta === 'number' ? pos.theta : prev.currentPosition.theta,
         },
-      points: data.points ?? prev.points,
-      status: data.status ?? prev.status,
-      progress_percent: data.progress_percent ?? prev.progress_percent,
-    }));
+        points: { x: xs, y: ys, theta: thetas.length ? thetas : prev.points.theta },
+        status: data.status ?? prev.status,
+        progress_percent: data.progress_percent ?? prev.progress_percent,
+      }));
+    }
     setLoading(false);
     setError(null);
   }, [selectedRobotId]);
@@ -191,22 +196,22 @@ const RobotStatusWidget: React.FC = () => {
     const subscriptions: (()=>void)[] = [];
 
     if (liveUpdateEnabled) {
-        sendMessage({ type: "direct_subscribe", data_type: "robot_status", robot_ip: selectedRobotId });
+        sendMessage({ command: "subscribe", type: "robot_status", robot_alias: selectedRobotId });
         subscriptions.push(subscribeToMessageType('robot_status', handleRobotStatusUpdate as any, `status-widget-status-${selectedRobotId}`));
     } else {
         sendMessage({ type: "get_robot_status", robot_ip: selectedRobotId });
     }
     
-    sendMessage({ type: "direct_subscribe", data_type: "trajectory_update", robot_ip: selectedRobotId });
-    subscriptions.push(subscribeToMessageType('trajectory_update', handleTrajectoryUpdate as any, `status-widget-trajectory-${selectedRobotId}`));
+    sendMessage({ command: "subscribe", type: "realtime_trajectory", robot_alias: selectedRobotId });
+    subscriptions.push(subscribeToMessageType('realtime_trajectory', handleTrajectoryUpdate as any, `status-widget-trajectory-${selectedRobotId}`));
     
     subscriptions.push(subscribeToMessageType('trajectory_history_response', handleTrajectoryUpdate as any, `status-widget-trajectory-history-${selectedRobotId}`));
 
     subscriptions.push(subscribeToMessageType('error', handleErrorUpdate as any, `status-widget-error-${selectedRobotId}`));
 
     return () => {
-      sendMessage({ type: "direct_unsubscribe", data_type: "robot_status", robot_ip: selectedRobotId });
-      sendMessage({ type: "direct_unsubscribe", data_type: "trajectory_update", robot_ip: selectedRobotId });
+      sendMessage({ command: "unsubscribe", type: "robot_status", robot_alias: selectedRobotId });
+      sendMessage({ command: "unsubscribe", type: "realtime_trajectory", robot_alias: selectedRobotId });
       subscriptions.forEach(unsub => unsub());
     };
   }, [selectedRobotId, webSocketIsConnected, liveUpdateEnabled, sendMessage, subscribeToMessageType, handleRobotStatusUpdate, handleTrajectoryUpdate, handleErrorUpdate]);

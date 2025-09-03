@@ -1,0 +1,5 @@
+Time Message
+1756787615.527 W (2329) Motor: Setup Motor Done
+1756787615.529 W (2329) Position_Handler: Robot position reset to (1.800, 1.200, 0.000)
+1756787686.328 W (73179) Socket: Received: Upgrade
+1756787686.328 W (73179) Socket: ----Switch to Upgrade----

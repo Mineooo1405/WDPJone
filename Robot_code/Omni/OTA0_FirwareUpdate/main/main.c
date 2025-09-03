@@ -21,9 +21,9 @@
 // #define WIFI_PASS "25102004"
 // #define SERVER_IP "192.168.182.85"
 
-#define WIFI_SSID "CEEC_Tenda"
-#define WIFI_PASS "1denmuoi1"
-#define SERVER_IP "192.168.2.126"
+#define WIFI_SSID "Nhat Minh"
+#define WIFI_PASS "14052004"
+#define SERVER_IP "192.168.1.53"
 
 // #define WIFI_SSID "UIT_CAR_RACING_2023"
 // #define WIFI_PASS "sinhvien_CEEC"
@@ -162,6 +162,7 @@ void ota_update_task(void *pvParameter)
         update_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
         if (esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle) != ESP_OK)
         {
+            printf("OTA begin failed: %s\n", esp_err_to_name(esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle)));
             ESP_LOGE(TAG, "OTA initialization failed!");
             close(socket_fd);
             vTaskDelete(NULL);

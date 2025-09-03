@@ -42,7 +42,7 @@ interface EncoderData {
   robot_alias: string; // Added for clarity, though filtering will use this
 }
 
-const EncoderDataWidget: React.FC = () => {
+const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
   
   const [encoderData, setEncoderData] = useState<EncoderData>({
@@ -61,7 +61,7 @@ const EncoderDataWidget: React.FC = () => {
     encoder3: number[];
   }>({ timestamps: [], encoder1: [], encoder2: [], encoder3: [] });
   
-  const [liveUpdate, setLiveUpdate] = useState(false);
+  const [liveUpdate, setLiveUpdate] = useState(true);
   const [widgetError, setWidgetError] = useState<string | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   
@@ -164,7 +164,7 @@ const EncoderDataWidget: React.FC = () => {
     if (shouldBeSubscribed && !isSubscribed) {
       console.log(`EncoderWidget: Subscribing to encoder_data for ${selectedRobotId}`);
       sendJsonMessage({
-        command: "direct_subscribe",
+        command: "subscribe",
         type: "encoder_data",
         robot_alias: selectedRobotId
       });
@@ -178,7 +178,7 @@ const EncoderDataWidget: React.FC = () => {
     else if (!shouldBeSubscribed && subscribedRobotId.current) {
       console.log(`EncoderWidget: Unsubscribing from encoder_data for ${subscribedRobotId.current}`);
       sendJsonMessage({
-        command: "direct_unsubscribe",
+        command: "unsubscribe",
         type: "encoder_data",
         robot_alias: subscribedRobotId.current
       });
@@ -191,7 +191,7 @@ const EncoderDataWidget: React.FC = () => {
       if (subscribedRobotId.current && readyState === ReadyState.OPEN) {
         console.log(`EncoderWidget: Cleanup - Unsubscribing from ${subscribedRobotId.current} (encoder_data) on unmount/dependency change`);
         sendJsonMessage({
-            command: "direct_unsubscribe",
+            command: "unsubscribe",
             type: "encoder_data",
             robot_alias: subscribedRobotId.current
         });
@@ -379,7 +379,7 @@ const EncoderDataWidget: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-full p-4 bg-gray-800 text-gray-200 rounded-lg shadow-xl">
+    <div className={`flex flex-col h-full ${compact ? 'p-2' : 'p-4'} bg-gray-800 text-gray-200 rounded-lg shadow-xl`}>
       <WidgetConnectionHeader
         title={`Encoder Data (${selectedRobotId || 'Chưa chọn Robot'})`}
         statusTextOverride={derivedStatusText}
@@ -390,35 +390,37 @@ const EncoderDataWidget: React.FC = () => {
         hideConnectionControls={!(selectedRobotId && readyState === ReadyState.OPEN)}
       />
       
-      <div className="flex gap-2 mb-4 items-center flex-wrap">
-        <button
-          onClick={togglePause}
-          disabled={!liveUpdate || readyState !== ReadyState.OPEN || !selectedRobotId} 
-          title={isPaused ? 'Tiếp tục biểu đồ' : 'Đóng băng biểu đồ'}
-          className={`px-3 py-1.5 rounded-md flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed
-            ${isPaused ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-blue-600 hover:bg-blue-700'} text-white`}
-        >
-          {isPaused ? <Play size={14} /> : <Pause size={14} />}
-          <span>{isPaused ? 'Resume Chart' : 'Freeze Chart'}</span>
-        </button>
-        
-        <button
-          onClick={clearHistory}
-          title="Xóa lịch sử và reset biểu đồ"
-          className="px-3 py-1.5 bg-gray-600 text-white rounded-md flex items-center gap-1 hover:bg-gray-700 disabled:opacity-50"
-        >
-          <RefreshCw size={14} />
-          <span>Clear</span>
-        </button>
-        
-        <button
-          onClick={downloadData}
-          disabled={encoderHistory.timestamps.length === 0}
-          className="px-3 py-1.5 bg-indigo-600 text-white rounded-md flex items-center gap-1 hover:bg-indigo-700 disabled:opacity-50"
-        >
-          <span>Download CSV</span>
-        </button>
-      </div>
+      {!compact && (
+        <div className="flex gap-2 mb-4 items-center flex-wrap">
+          <button
+            onClick={togglePause}
+            disabled={!liveUpdate || readyState !== ReadyState.OPEN || !selectedRobotId} 
+            title={isPaused ? 'Tiếp tục biểu đồ' : 'Đóng băng biểu đồ'}
+            className={`px-3 py-1.5 rounded-md flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed
+              ${isPaused ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-blue-600 hover:bg-blue-700'} text-white`}
+          >
+            {isPaused ? <Play size={14} /> : <Pause size={14} />}
+            <span>{isPaused ? 'Resume Chart' : 'Freeze Chart'}</span>
+          </button>
+          
+          <button
+            onClick={clearHistory}
+            title="Xóa lịch sử và reset biểu đồ"
+            className="px-3 py-1.5 bg-gray-600 text-white rounded-md flex items-center gap-1 hover:bg-gray-700 disabled:opacity-50"
+          >
+            <RefreshCw size={14} />
+            <span>Clear</span>
+          </button>
+          
+          <button
+            onClick={downloadData}
+            disabled={encoderHistory.timestamps.length === 0}
+            className="px-3 py-1.5 bg-indigo-600 text-white rounded-md flex items-center gap-1 hover:bg-indigo-700 disabled:opacity-50"
+          >
+            <span>Download CSV</span>
+          </button>
+        </div>
+      )}
 
       {widgetError && (
         <div className="bg-red-100 border border-red-400 text-red-700 px-3 py-2 rounded mb-3 text-sm break-all">
@@ -438,7 +440,7 @@ const EncoderDataWidget: React.FC = () => {
         ))}
       </div>
 
-      <div className="flex-grow relative" style={{ minHeight: '300px' }}>
+      <div className="flex-grow relative" style={{ minHeight: compact ? '220px' : '300px' }}>
         { (readyState === ReadyState.OPEN && selectedRobotId && encoderHistory.timestamps.length > 0) || (!liveUpdate && encoderHistory.timestamps.length > 0) ? (
           <div className="relative h-full w-full">
             <Line ref={chartRef} options={chartOptions as any} data={chartData} />
