@@ -46,6 +46,14 @@ class AppGUI:
         self.stop_button = Button(control_frame, text="Stop All", command=self.confirm_stop_all_servers_thread, state=tk.DISABLED)
         self.stop_button.pack(side=LEFT, padx=5)
 
+        # New Reset button: stop then start again
+        self.reset_button = Button(control_frame, text="Reset", command=self.reset_all_servers_thread, state=tk.DISABLED)
+        self.reset_button.pack(side=LEFT, padx=5)
+
+        # Start Simulator button
+        self.sim_button = Button(control_frame, text="Start Sim", command=self.start_sim_robot_thread)
+        self.sim_button.pack(side=LEFT, padx=5)
+
         # Output Area Frame
         output_area_frame = Frame(main_frame)
         output_area_frame.pack(fill=BOTH, expand=True)
@@ -56,18 +64,18 @@ class AppGUI:
         Label(output_area_frame, text="Backend Output", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky=W, pady=(0,2))
         self.backend_output_text = scrolledtext.ScrolledText(output_area_frame, wrap=tk.WORD, height=15, font=("Consolas", 9))
         self.backend_output_text.grid(row=1, column=0, sticky=N+S+E+W, padx=(0,2))
-        self.backend_output_text.configure(state='disabled') # Start disabled
+        self.backend_output_text.configure(state='disabled')
 
         Label(output_area_frame, text="Frontend Output", font=("Arial", 10, "bold")).grid(row=0, column=1, sticky=W, pady=(0,2))
         self.frontend_output_text = scrolledtext.ScrolledText(output_area_frame, wrap=tk.WORD, height=15, font=("Consolas", 9))
         self.frontend_output_text.grid(row=1, column=1, sticky=N+S+E+W, padx=(2,0))
-        self.frontend_output_text.configure(state='disabled') # Start disabled
+        self.frontend_output_text.configure(state='disabled')
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing_thread)
         self.check_output_queue()
 
         self.threads = []
-        self.stop_event = threading.Event() # Event to signal threads to stop
+        self.stop_event = threading.Event()
 
     def update_output(self, process_name, line):
         if "Backend" in process_name:
@@ -99,14 +107,15 @@ class AppGUI:
     def start_all_servers_thread(self):
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
+        self.reset_button.config(state=tk.NORMAL)
         self.backend_output_text.configure(state='normal')
         self.backend_output_text.delete(1.0, END)
         self.backend_output_text.configure(state='disabled')
         self.frontend_output_text.configure(state='normal')
         self.frontend_output_text.delete(1.0, END)
         self.frontend_output_text.configure(state='disabled')
-        
-        self.stop_event.clear() 
+
+        self.stop_event.clear()
         thread = threading.Thread(target=start_servers, args=(self.stop_event,))
         self.threads.append(thread)
         thread.daemon = True
@@ -119,12 +128,99 @@ class AppGUI:
     def stop_all_servers_thread(self):
         self.update_output("System", "Stop All button pressed. Initiating shutdown...")
         self.stop_button.config(state=tk.DISABLED) 
+        self.reset_button.config(state=tk.DISABLED)
         self.stop_event.set()
         
         # Pass the global output_queue to stop_servers
         stop_thread = threading.Thread(target=stop_servers, args=("GUI Stop Button", self.start_button, output_queue))
         stop_thread.daemon = True
         stop_thread.start()
+
+    def start_sim_robot_thread(self):
+        """Start the local simulator UI as a managed process."""
+        # Disable the button to prevent duplicate starts
+        try:
+            self.sim_button.config(state=tk.DISABLED)
+        except tk.TclError:
+            pass
+
+        self.update_output("System", "Starting simulator (sim_robot.py --ui)...")
+
+        def _run_sim():
+            try:
+                script_file_path = Path(__file__)
+                project_root_dir = script_file_path.resolve().parent.parent
+                cmd = f"{sys.executable} Robot_code/Omni/sim_robot.py --ui"
+                proc = run_command_gui(cmd, cwd=project_root_dir)
+                if proc.stdout is None or proc.stderr is None:
+                    output_queue.put(("System-ERR", "Failed to get stdout/stderr for simulator process."))
+                    self.root.after(0, lambda: self.sim_button.config(state=tk.NORMAL))
+                    return
+                managed_processes.append(("Simulator", proc))
+                t_out = threading.Thread(target=enqueue_output_gui, args=(proc.stdout, output_queue, "Simulator"))
+                t_err = threading.Thread(target=enqueue_output_gui, args=(proc.stderr, output_queue, "Simulator-ERR"))
+                t_out.daemon = True; t_err.daemon = True
+                t_out.start(); t_err.start()
+                # Wait until simulator exits (either user closed it or Stop All killed it)
+                proc.wait()
+            except Exception as e:
+                output_queue.put(("System-ERR", f"Simulator encountered an error: {e}"))
+            finally:
+                # Re-enable button on main thread
+                try:
+                    self.root.after(0, lambda: self.sim_button.config(state=tk.NORMAL))
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_run_sim)
+        t.daemon = True
+        t.start()
+
+    def reset_all_servers_thread(self):
+        """Stop all servers and start them again in a background thread."""
+        # If nothing is running yet, just start
+        if not managed_processes:
+            self.start_all_servers_thread()
+            return
+
+        self.update_output("System", "Reset requested: stopping and restarting all servers...")
+        # Disable controls during reset
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.DISABLED)
+        self.reset_button.config(state=tk.DISABLED)
+
+        def _reset_worker():
+            try:
+                # Stop phase
+                self.stop_event.set()
+                stop_servers("GUI Reset Button", self.start_button, output_queue)
+                # Start phase
+                self.stop_event.clear()
+                # Clear outputs for a clean restart
+                try:
+                    self.backend_output_text.configure(state='normal')
+                    self.backend_output_text.delete(1.0, END)
+                    self.backend_output_text.configure(state='disabled')
+                    self.frontend_output_text.configure(state='normal')
+                    self.frontend_output_text.delete(1.0, END)
+                    self.frontend_output_text.configure(state='disabled')
+                except tk.TclError:
+                    pass
+                # Start servers in a new monitoring thread
+                thread = threading.Thread(target=start_servers, args=(self.stop_event,))
+                self.threads.append(thread)
+                thread.daemon = True
+                thread.start()
+                # Update controls back on main thread
+                self.root.after(0, lambda: self.stop_button.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.reset_button.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.start_button.config(state=tk.DISABLED))
+            except Exception as e:
+                output_queue.put(("System-ERR", f"Reset failed: {e}"))
+
+        t = threading.Thread(target=_reset_worker)
+        t.daemon = True
+        t.start()
 
     def on_closing_thread(self):
         # First, ask the user if they want to quit.
@@ -150,6 +246,10 @@ class AppGUI:
                 try:
                     self.stop_button.config(state=tk.DISABLED)
                 except tk.TclError: pass # Ignore if already destroyed
+            if hasattr(self, 'reset_button') and self.reset_button:
+                try:
+                    self.reset_button.config(state=tk.DISABLED)
+                except tk.TclError: pass
 
             # Start the stop_servers thread
             thread = threading.Thread(target=stop_servers, args=("Window Close", self.start_button, output_queue))

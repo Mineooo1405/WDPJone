@@ -40,6 +40,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
 
   const [currentPath, setCurrentPath] = useState<TrajectoryPoint[]>([]);
   const [currentPose, setCurrentPose] = useState<RobotPose | null>(null);
+  const currentPoseRef = useRef<RobotPose | null>(null); // For plugin access
   const [widgetError, setWidgetError] = useState<string | null>(null);
   const subscribedToRobotRef = useRef<string | null>(null);
 
@@ -60,6 +61,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
               theta: typeof position.theta === 'number' ? position.theta : 0, // Default theta if undefined
             };
             setCurrentPose(newPose);
+            currentPoseRef.current = newPose; // keep ref synced for plugin
             // console.log("[TrajectoryWidget] Updated currentPose:", newPose); // Log new pose
 
             const newPathPoints: TrajectoryPoint[] = path
@@ -99,6 +101,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
                           theta: typeof lastPoint.theta === 'number' ? lastPoint.theta : 0,
                       };
                       setCurrentPose(newPose);
+                      currentPoseRef.current = newPose;
                       // console.log("[TrajectoryWidget] Updated currentPose from trajectory_data:", newPose);
                   }
               }
@@ -189,6 +192,82 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     if (!canvasRef.current) return;
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
+    // Plugin to draw a 3-wheel omni robot: body + 3 wheels + heading mark
+    const robotIconPlugin: any = {
+      id: 'robotIconPlugin',
+      afterDatasetsDraw: (chart: any) => {
+        const pose = currentPoseRef.current;
+        if (!pose) return;
+        const xScale = chart.scales['x'];
+        const yScale = chart.scales['y'];
+        if (!xScale || !yScale) return;
+        const cx = xScale.getPixelForValue(pose.x);
+        const cy = yScale.getPixelForValue(pose.y);
+        const ctx2 = chart.ctx as CanvasRenderingContext2D;
+        const bodyR = 10;          // robot body radius in px
+        const wheelR = bodyR + 6;  // distance from center to wheel center
+        const wheelLen = 12;       // wheel length in px
+        const wheelThk = 4;        // wheel thickness in px
+        const arrowLen = 14;       // heading arrow length
+        const arrowBase = 8;       // heading arrow base width
+        ctx2.save();
+        ctx2.translate(cx, cy);
+        // Convert math/IMU angle (CCW, +y up) to canvas (+y down): rotate by -theta
+        ctx2.rotate(-(pose.theta || 0));
+        // Body circle
+        ctx2.beginPath();
+        ctx2.arc(0, 0, bodyR, 0, Math.PI * 2);
+        ctx2.fillStyle = 'rgba(54, 162, 235, 0.25)';
+        ctx2.fill();
+        ctx2.lineWidth = 2;
+        ctx2.strokeStyle = 'rgb(54, 162, 235)';
+        ctx2.stroke();
+        // Draw 3 omni wheels at 120-degree intervals; wheel long axis tangent to body circle
+        const wheelAngles = [0, (2*Math.PI)/3, (4*Math.PI)/3]; // radians in robot frame
+        for (const ang of wheelAngles) {
+          const wx = wheelR * Math.cos(ang);
+          const wy = wheelR * Math.sin(ang);
+          ctx2.save();
+          ctx2.translate(wx, wy);
+          // Wheel tangent orientation: rotate by ang + 90deg
+          ctx2.rotate(ang + Math.PI/2);
+          // Draw rounded rectangle to represent wheel module
+          const w = wheelLen;
+          const h = wheelThk;
+          const rx = -w/2;
+          const ry = -h/2;
+          const r = Math.min(2, h/2);
+          ctx2.beginPath();
+          // Rounded rect path
+          ctx2.moveTo(rx + r, ry);
+          ctx2.lineTo(rx + w - r, ry);
+          ctx2.quadraticCurveTo(rx + w, ry, rx + w, ry + r);
+          ctx2.lineTo(rx + w, ry + h - r);
+          ctx2.quadraticCurveTo(rx + w, ry + h, rx + w - r, ry + h);
+          ctx2.lineTo(rx + r, ry + h);
+          ctx2.quadraticCurveTo(rx, ry + h, rx, ry + h - r);
+          ctx2.lineTo(rx, ry + r);
+          ctx2.quadraticCurveTo(rx, ry, rx + r, ry);
+          ctx2.closePath();
+          ctx2.fillStyle = 'rgba(200, 200, 200, 0.85)';
+          ctx2.fill();
+          ctx2.lineWidth = 1.5;
+          ctx2.strokeStyle = 'rgba(80, 80, 80, 0.9)';
+          ctx2.stroke();
+          ctx2.restore();
+        }
+        // Heading triangle pointing along +X in local frame (small, just a cue)
+        ctx2.beginPath();
+        ctx2.moveTo(arrowLen, 0);
+        ctx2.lineTo(-arrowLen * 0.35, arrowBase / 2);
+        ctx2.lineTo(-arrowLen * 0.35, -arrowBase / 2);
+        ctx2.closePath();
+        ctx2.fillStyle = 'rgb(54, 162, 235)';
+        ctx2.fill();
+        ctx2.restore();
+      }
+    };
+
     chartRef.current = new ChartJS(ctx, {
       type: 'line',
       data: {
@@ -204,7 +283,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
             tension: 0.1,
           },
         ],
-      },
+  },
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -242,6 +321,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
         },
         aspectRatio: 1,
       },
+      plugins: [robotIconPlugin],
     });
     return () => {
       chartRef.current?.destroy();
@@ -255,6 +335,12 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     chartRef.current.data.datasets[0].data = currentPath as any;
     chartRef.current.update('none');
   }, [currentPath]);
+
+  // Repaint arrow when pose updates
+  useEffect(() => {
+    if (!chartRef.current) return;
+    chartRef.current.update('none');
+  }, [currentPose]);
 
   const resetZoom = () => chartRef.current?.resetZoom();
   const clearPath = () => {

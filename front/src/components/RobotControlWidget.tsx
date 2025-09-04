@@ -151,7 +151,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
 
     const messageToSend = {
       // Map high-level payload types to backend plaintext commands
-      ...(payloadForRobot.type === 'motion' ? { command: 'vector_control', robot_alias: currentSelectedIp, dot_x: payloadForRobot.x, dot_y: payloadForRobot.y, dot_theta: payloadForRobot.theta, stop_time: 0 } : {}),
+      ...(payloadForRobot.type === 'motion' ? { command: 'vector_control', robot_alias: currentSelectedIp, dot_x: payloadForRobot.x, dot_y: payloadForRobot.y, dot_theta: payloadForRobot.theta, stop_time: (payloadForRobot as any).stop_time ?? 0 } : {}),
       ...(payloadForRobot.type === 'motor_speed' ? { command: 'motor_speed', robot_alias: currentSelectedIp, motor_id: payloadForRobot.motor, speed: payloadForRobot.speed } : {}),
       ...(payloadForRobot.type === 'emergency_stop' ? { command: 'emergency_stop', robot_alias: currentSelectedIp } : {}),
       ...(payloadForRobot.type === 'pid_values' ? { command: 'set_pid', robot_alias: currentSelectedIp, motor_id: payloadForRobot.motor, kp: payloadForRobot.kp, ki: payloadForRobot.ki, kd: payloadForRobot.kd } : {}),
@@ -214,33 +214,66 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
     sendWsCommand({ type: "emergency_stop" });
   }, [currentSelectedIp, webSocketIsConnected, sendWsCommand]);
 
-  // --- START: Keyboard Control Logic ---
+  // --- START: Keyboard Control Logic (Step per key press) ---
   useEffect(() => {
-    const KBD_SPEED_LINEAR = 0.3; // Tốc độ tuyến tính (cho X và Y)
-    const KBD_ANGULAR_SPEED = 0.5; // Tốc độ xoay cơ bản
+    const KBD_SPEED_LINEAR = 0.3; // m/s
+    const KBD_ANGULAR_SPEED = 0.5; // rad/s
+    const STEP_DURATION_MS = 180; // thời gian mỗi bước
 
-    let targetX = 0; // Theo code tham khảo: W/S -> X (Tiến/Lùi)
-    let targetY = 0; // Theo code tham khảo: A/D -> Y (Trái/Phải)
-    let targetTheta = 0;
+    const sendStep = (vx: number, vy: number, omega: number) => {
+      // Gửi xung chuyển động ngắn, sau đó tự dừng
+      // Truyền stop_time để backend tích phân trong khoảng thời gian ngắn
+      throttledSendCommand({ type: "motion", x: vx, y: vy, theta: omega, stop_time: STEP_DURATION_MS } as any);
+      setTimeout(() => {
+        throttledSendCommand({ type: "motion", x: 0, y: 0, theta: 0 });
+      }, STEP_DURATION_MS);
+    };
 
-    // Điều khiển Tiến/Lùi (W/S) -> targetX
-    if (keysPressed.w) targetX = KBD_SPEED_LINEAR * maxSpeed;       // Tiến
-    if (keysPressed.s) targetX = -KBD_SPEED_LINEAR * maxSpeed;      // Lùi
-    
-    // Điều khiển Trái/Phải (A/D) -> targetY
-    if (keysPressed.a) targetY = KBD_SPEED_LINEAR * maxSpeed;      // Sang trái (Y dương)
-    if (keysPressed.d) targetY = -KBD_SPEED_LINEAR * maxSpeed;     // Sang phải (Y âm)
-    
-    // Điều khiển xoay (Q/E) -> targetTheta
-    if (keysPressed.q) targetTheta = KBD_ANGULAR_SPEED * maxAngular;  // Xoay trái (Theta dương)
-    if (keysPressed.e) targetTheta = -KBD_ANGULAR_SPEED * maxAngular; // Xoay phải (Theta âm)
+    const kbRef = keyboardControlRef.current;
+    if (!kbRef) return;
 
-    // Chỉ gọi updateVelocities nếu có phím nào đó được nhấn hoặc nếu vận tốc trước đó khác 0 (để gửi lệnh dừng)
-    if (targetX !== 0 || targetY !== 0 || targetTheta !== 0 || 
-        velocities.x !== 0 || velocities.y !== 0 || velocities.theta !== 0) {
-      updateVelocities(targetX, targetY, targetTheta);
-    }
-  }, [keysPressed, updateVelocities, maxSpeed, maxAngular, velocities]);
+    const handleFocus = () => setHasFocus(true);
+    const handleBlur = () => setHasFocus(false);
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!hasFocus) return;
+      const key = event.key.toLowerCase();
+      if (["w","a","s","d","q","e"].includes(key)) {
+        // Bỏ auto-repeat để mỗi lần nhấn là một bước
+        if ((event as any).repeat) return;
+        event.preventDefault();
+        setKeysPressed(prev => ({ ...prev, [key]: true }));
+        let vx = 0, vy = 0, omg = 0;
+        if (key === 'w') vx = KBD_SPEED_LINEAR * maxSpeed;
+        if (key === 's') vx = -KBD_SPEED_LINEAR * maxSpeed;
+        if (key === 'a') vy = KBD_SPEED_LINEAR * maxSpeed;
+        if (key === 'd') vy = -KBD_SPEED_LINEAR * maxSpeed;
+        if (key === 'q') omg = KBD_ANGULAR_SPEED * maxAngular;
+        if (key === 'e') omg = -KBD_ANGULAR_SPEED * maxAngular;
+        sendStep(vx, vy, omg);
+      }
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (!hasFocus) return;
+      const key = event.key.toLowerCase();
+      if (["w","a","s","d","q","e"].includes(key)) {
+        event.preventDefault();
+        setKeysPressed(prev => ({ ...prev, [key]: false }));
+      }
+    };
+
+    kbRef.addEventListener('focus', handleFocus);
+    kbRef.addEventListener('blur', handleBlur);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      kbRef.removeEventListener('focus', handleFocus);
+      kbRef.removeEventListener('blur', handleBlur);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [sendWsCommand, throttledSendCommand, maxSpeed, maxAngular, hasFocus]);
 
   useEffect(() => {
     const kbRef = keyboardControlRef.current;

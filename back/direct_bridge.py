@@ -51,11 +51,7 @@ async def broadcast_to_all_ui(message_payload):
             if isinstance(result, Exception):
                 ws_to_remove = list(ui_websockets)[i] # This indexing might be fragile if set changes during await
                 logger.error(f"Error sending to UI websocket {ws_to_remove.remote_address}: {result}. Removing.")
-                # ui_websockets.remove(ws_to_remove) # Consider safer removal, e.g., marking for removal
-                # For now, direct removal, but be cautious if broadcast_to_all_ui is called very frequently
-                # and concurrently with ui_websockets modifications.
-                # A safer approach is to remove based on the exception during the main loop of handle_ws_client
-
+                
 # --- TrajectoryCalculator class ---
 class TrajectoryCalculator: 
     def __init__(self):
@@ -104,6 +100,37 @@ class TrajectoryCalculator:
     def _rpm_to_omega(self, rpm):
         return rpm * (2 * math.pi) / 60.0
 
+    def update_position_packet(self, unique_robot_key, position_payload):
+        """
+        Authoritatively set the robot pose from firmware 'position' packet.
+        position_payload: dict with keys x, y, theta (radians).
+        Resets control integration timer and appends to path history.
+        """
+        self._ensure_robot_data(unique_robot_key)
+        robot_state = self.robot_data[unique_robot_key]
+
+        try:
+            x = float(position_payload.get("x", robot_state["x"]))
+            y = float(position_payload.get("y", robot_state["y"]))
+            theta = float(position_payload.get("theta", robot_state["theta"]))
+        except Exception:
+            # If payload malformed, return current snapshot
+            current_pose = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+            return {"position": current_pose, "path": list(robot_state["path_history"]) }
+
+        robot_state["x"] = x
+        robot_state["y"] = y
+        robot_state["theta"] = theta
+        # Firmware pose is authoritative; reset integration timers
+        robot_state["last_timestamp_control"] = None
+
+        new_point = {"x": x, "y": y, "theta": theta}
+        robot_state["path_history"].append(new_point)
+        if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
+            robot_state["path_history"] = robot_state["path_history"][-MAX_TRAJECTORY_POINTS_DEFAULT:]
+
+        return {"position": new_point, "path": list(robot_state["path_history"]) }
+
     def update_encoder_data(self, unique_robot_key, encoder_data):
         self._ensure_robot_data(unique_robot_key)
         robot_state = self.robot_data[unique_robot_key]
@@ -140,26 +167,31 @@ class TrajectoryCalculator:
         # Simple kinematics: vx = avg(omegas) * wheel_radius
         vx_robot = WHEEL_RADIUS_DEFAULT * (omega_m1 + omega_m2 + omega_m3) / 3.0
         vy_robot = 0  # For 3-wheel omni, you may want to use a more complex model
-        cos_h = math.cos(robot_state["theta"])
-        sin_h = math.sin(robot_state["theta"])
+
+        # Transform robot-frame velocities to world-frame using standard rotation
+        theta = robot_state["theta"]
+        cos_h = math.cos(theta)
+        sin_h = math.sin(theta)
         vx_world = vx_robot * cos_h - vy_robot * sin_h
         vy_world = vx_robot * sin_h + vy_robot * cos_h
         robot_state["x"] += vx_world * dt
         robot_state["y"] += vy_world * dt
         robot_state["theta"] = current_heading_rad
+        # Since we used reliable encoder data, reset control integration timer to avoid stale dt accumulation
+        robot_state["last_timestamp_control"] = None
         # At the end of successful calculation:
         new_point = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
         robot_state["path_history"].append(new_point)
         if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
             robot_state["path_history"] = robot_state["path_history"][-MAX_TRAJECTORY_POINTS_DEFAULT:]
         # This return is already correct
-        return {"position": new_point, "path": list(robot_state["path_history"])}
+        return {"position": new_point, "path": list(robot_state["path_history"]) }
 
-    def update_control_command(self, unique_robot_key, vx_robot, vy_robot, omega, timestamp=None):
+    def update_control_command(self, unique_robot_key, vx_robot, vy_robot, omega, timestamp=None, override=False):
         """
         Integrate control commands when encoder data is absent. vx/vy are robot-frame linear velocities (m/s),
         omega is angular velocity (rad/s). Uses current heading to convert to world frame.
-        Suppresses integration if encoder updated very recently.
+        Suppresses integration if encoder updated very recently unless override=True.
         """
         self._ensure_robot_data(unique_robot_key)
         robot_state = self.robot_data[unique_robot_key]
@@ -167,11 +199,20 @@ class TrajectoryCalculator:
         # If encoder has been seen very recently, skip control-based integration to avoid double-counting
         last_enc_t = robot_state.get("last_timestamp_encoder")
         now_t = timestamp if timestamp is not None else time.time()
-        if last_enc_t is not None and (now_t - last_enc_t) <= self.CONTROL_SUPPRESS_WINDOW:
+        if last_enc_t is not None and (now_t - last_enc_t) <= self.CONTROL_SUPPRESS_WINDOW and not override:
             return {"position": {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]},
                     "path": list(robot_state["path_history"]) }
 
-        # Initialize timing for control
+        # If commanded stop, reset control timer and append a point for UI, then return
+        if abs(vx_robot) < 1e-6 and abs(vy_robot) < 1e-6 and abs(omega) < 1e-6:
+            robot_state["last_timestamp_control"] = None
+            new_point = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
+            robot_state["path_history"].append(new_point)
+            if len(robot_state["path_history"]) > MAX_TRAJECTORY_POINTS_DEFAULT:
+                robot_state["path_history"] = robot_state["path_history"][-MAX_TRAJECTORY_POINTS_DEFAULT:]
+            return {"position": new_point, "path": list(robot_state["path_history"]) }
+
+        # Initialize timing for control on first non-zero command
         if robot_state.get("last_timestamp_control") is None:
             robot_state["last_timestamp_control"] = now_t
             # Append a point so UI can draw even before motion accumulates
@@ -185,9 +226,12 @@ class TrajectoryCalculator:
         if dt <= 0:
             return {"position": {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]},
                     "path": list(robot_state["path_history"]) }
+        # Clamp dt to prevent large jumps after idle
+        if dt > 0.25:
+            dt = 0.25
         robot_state["last_timestamp_control"] = now_t
 
-        # Transform to world frame using current heading
+        # Transform to world frame using current heading (no axis swap; +X body is forward/arrow)
         theta = robot_state["theta"]
         cos_h = math.cos(theta)
         sin_h = math.sin(theta)
@@ -675,13 +719,21 @@ class DirectBridge:
             return False
         reader, writer = conn_tuple
         try:
-            # First try exactly "Upgrade" without newline (matches Omni_Server behavior)
-            writer.write(b"Upgrade")
-            await writer.drain()
-            await asyncio.sleep(0.05)
-            # Also try with newline in case firmware expects line-based parsing
-            writer.write(b"Upgrade\n")
-            await writer.drain()
+            # Choose how to send the Upgrade command based on env (default: raw)
+            # BRIDGE_UPGRADE_MODE: 'newline' | 'raw' | 'both'
+            mode = os.environ.get("BRIDGE_UPGRADE_MODE", "raw").lower()
+            if mode == "raw":
+                writer.write(b"Upgrade")
+                await writer.drain()
+            elif mode == "both":
+                writer.write(b"Upgrade")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+                writer.write(b"Upgrade\n")
+                await writer.drain()
+            else:  # 'newline'
+                writer.write(b"Upgrade\n")
+                await writer.drain()
             return True
         except Exception as e:
             log_tcp.error(f"Failed to send Upgrade command to {robot_alias}: {e}")
@@ -1067,6 +1119,24 @@ class DirectBridge:
                         robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
                         await self.broadcast_to_subscribers(current_alias, robot_status_payload)
 
+                    elif msg_type == "position_update":
+                        # transformed_message for position_update is:
+                        # {"type": "position_update", "data": {"x": float(m), "y": float(m), "theta": float(rad)}}
+                        pos_data = transformed_message.get("data", {})
+                        traj_res = self.trajectory_calculator.update_position_packet(unique_robot_key, pos_data)
+                        if isinstance(traj_res, dict) and isinstance(traj_res.get("position"), dict) and isinstance(traj_res.get("path"), list):
+                            traj_payload = {
+                                "type": "realtime_trajectory",
+                                "robot_ip": robot_ip_address,
+                                "robot_alias": current_alias,
+                                "timestamp": time.time(),
+                                "position": traj_res["position"],
+                                "path": traj_res["path"],
+                            }
+                            await self.broadcast_to_subscribers(current_alias, traj_payload)
+                            robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
+                            await self.broadcast_to_subscribers(current_alias, robot_status_payload)
+
                 except json.JSONDecodeError:
                     log_tcp.error(f"Invalid JSON from {current_alias} ({robot_ip_address}) (Control): {raw_data_str}")
                 except Exception as e_proc_loop:
@@ -1375,21 +1445,36 @@ class DirectBridge:
                             # Update trajectory from control command too (in case no encoder yet)
                             unique_key_for_ctrl = await self.get_robot_key_from_alias(robot_alias)
                             if unique_key_for_ctrl:
+                                now_t = time.time()
+                                # First tick: registers/start integration window
                                 ctrl_result = self.trajectory_calculator.update_control_command(
                                     unique_key_for_ctrl,
                                     vx_robot=dot_x,
                                     vy_robot=dot_y,
                                     omega=dot_theta,
-                                    timestamp=time.time(),
+                                    timestamp=now_t,
+                                    override=True,
                                 )
-                                if isinstance(ctrl_result, dict) and isinstance(ctrl_result.get("position"), dict) and isinstance(ctrl_result.get("path"), list):
+                                last_result = ctrl_result
+                                # If a duration is provided for a one-shot step, integrate once more at now+dt
+                                if stop_time and (abs(dot_x) > 1e-6 or abs(dot_y) > 1e-6 or abs(dot_theta) > 1e-6):
+                                    dt = min(max(stop_time / 1000.0, 0.05), 0.35)  # clamp between 50ms and 350ms
+                                    last_result = self.trajectory_calculator.update_control_command(
+                                        unique_key_for_ctrl,
+                                        vx_robot=dot_x,
+                                        vy_robot=dot_y,
+                                        omega=dot_theta,
+                                        timestamp=now_t + dt,
+                                        override=True,
+                                    )
+                                if isinstance(last_result, dict) and isinstance(last_result.get("position"), dict) and isinstance(last_result.get("path"), list):
                                     ctrl_traj_payload = {
                                         "type": "realtime_trajectory",
                                         "robot_ip": robot_alias,
                                         "robot_alias": robot_alias,
                                         "timestamp": time.time(),
-                                        "position": ctrl_result["position"],
-                                        "path": ctrl_result["path"],
+                                        "position": last_result["position"],
+                                        "path": last_result["path"],
                                     }
                                     await self.broadcast_to_subscribers(robot_alias, ctrl_traj_payload)
                                     # And status
@@ -1616,7 +1701,37 @@ def transform_robot_message(message_dict: dict) -> dict:
         if robot_reported_id:
              transformed_payload["robot_reported_id"] = robot_reported_id
 
-    # 3. Identify Log data (ESP32 / test.py sends type: "log_data")
+    # 3. Identify Position data (ESP32 sends type: "position")
+    elif original_type == "position" and "data" in message_dict and isinstance(message_dict["data"], dict):
+        # Expect firmware shape:
+        # {
+        #   "id":"<ID>",
+        #   "type":"position",
+        #   "data":{
+        #     "position":[x,y,thetaDeg],
+        #     "velocity":[vx,vy],
+        #     "acceleration":[ax,ay,az],
+        #     "vel_control":[vcx,vcy]
+        #   }
+        # }
+        transformed_payload["type"] = "position_update"
+        pos_arr = message_dict["data"].get("position")
+        theta_rad = 0.0
+        x = 0.0
+        y = 0.0
+        if isinstance(pos_arr, list) and len(pos_arr) >= 3:
+            try:
+                x = float(pos_arr[0])
+                y = float(pos_arr[1])
+                theta_deg = float(pos_arr[2])
+                theta_rad = theta_deg * math.pi / 180.0
+            except Exception:
+                pass
+        transformed_payload["data"] = {"x": x, "y": y, "theta": theta_rad}
+        if robot_reported_id:
+            transformed_payload["robot_reported_id"] = robot_reported_id
+
+    # 4. Identify Log data (ESP32 / test.py sends type: "log_data")
     elif original_type == "log": # MODIFIED from "log" to "log_data"
         transformed_payload["type"] = "log" # Keep the type as log_data for frontend
         transformed_payload["message"] = message_dict.get("message")
@@ -1624,7 +1739,7 @@ def transform_robot_message(message_dict: dict) -> dict:
         if robot_reported_id:
              transformed_payload["robot_reported_id"] = robot_reported_id
     
-    # 4. Identify Registration message (Đã có từ trước, giữ nguyên)
+    # 5. Identify Registration message (Đã có từ trước, giữ nguyên)
     elif original_type == "registration" and "capabilities" in message_dict:
         transformed_payload["type"] = "registration"
         transformed_payload["data"] = {
@@ -1636,12 +1751,12 @@ def transform_robot_message(message_dict: dict) -> dict:
         elif robot_reported_id and "robot_id" not in message_dict.get("data", {}): 
              transformed_payload["robot_reported_id_explicit"] = robot_reported_id
             
-    # 5. Handle other messages that have a 'type' field (generic passthrough) - THIS SHOULD BE CHECKED LATER
+    # 6. Handle other messages that have a 'type' field (generic passthrough) - THIS SHOULD BE CHECKED LATER
     elif original_type: # This might catch specific types if not handled above explicitly
         transformed_payload["type"] = f"generic_{original_type}"
         transformed_payload["data"] = message_dict.copy() 
     
-    # 6. Fallback for completely unknown structures
+    # 7. Fallback for completely unknown structures
     else:
         transformed_payload["type"] = "unknown_json_data"
         transformed_payload["data"] = message_dict.copy()
