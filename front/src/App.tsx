@@ -289,9 +289,9 @@ const App: React.FC = () => {
     <GlobalAppProvider>
       <DndProvider backend={HTML5Backend}>
         <RobotProvider>
-          <div className="w-screen h-screen flex flex-col bg-gray-100 overflow-hidden">
+          <div className="w-screen h-screen flex flex-col bg-gray-100 dark:bg-gray-900 overflow-hidden">
             {/* Header Bar */}
-            <div className="bg-blue-700 text-white p-4 shadow-lg flex justify-between items-center">
+            <div className="bg-blue-700 dark:bg-blue-800 text-white p-4 shadow-lg flex justify-between items-center">
               <div className="flex items-center">
                 <MonitorSmartphone size={24} className="mr-3" />
                 <h1 className="text-xl font-bold">ROBOT DASHBOARD</h1>
@@ -301,7 +301,7 @@ const App: React.FC = () => {
                 <div className="hidden sm:block text-sm opacity-80">Chế độ:</div>
                 <button
                   onClick={() => setLayoutMode(prev => prev === 'simple' ? 'custom' : 'simple')}
-                  className="bg-white text-blue-700 px-3 py-1.5 rounded-md shadow hover:bg-blue-50 text-sm"
+                  className="bg-white text-blue-700 px-3 py-1.5 rounded-md shadow hover:bg-blue-50 text-sm dark:bg-gray-800 dark:text-blue-200 dark:hover:bg-gray-700"
                   title="Chuyển giữa bố cục Đơn giản và Tùy biến"
                 >
                   {layoutMode === 'simple' ? 'Đơn giản' : 'Tùy biến'}
@@ -327,15 +327,15 @@ const App: React.FC = () => {
             ) : (
               <div className="flex-grow flex overflow-hidden">
                 {/* Sidebar */}
-                <div className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out
+                <div className={`bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col transition-all duration-300 ease-in-out
                   ${collapseSidebar ? "w-16" : "w-64"}`}>
                   
                   {/* Sidebar Header */}
-                  <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-                    {!collapseSidebar && <h2 className="font-semibold">Widget Library</h2>}
+                  <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                    {!collapseSidebar && <h2 className="font-semibold text-gray-900 dark:text-gray-100">Widget Library</h2>}
                     <button 
                       onClick={toggleSidebar}
-                      className="p-1 rounded-md hover:bg-gray-100 ml-auto text-gray-500"
+                      className="p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 ml-auto text-gray-500 dark:text-gray-300"
                     >
                       {collapseSidebar ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
                     </button>
@@ -347,8 +347,8 @@ const App: React.FC = () => {
                       onClick={() => setActiveCategory("control")}
                       className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2
                         ${activeCategory === "control" 
-                          ? "bg-blue-100 text-blue-700" 
-                          : "text-gray-600 hover:bg-gray-100"}`}
+                          ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200" 
+                          : "text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"}`}
                     >
                       <ActivitySquare size={16} />
                       {!collapseSidebar && <span>Control</span>}
@@ -357,7 +357,7 @@ const App: React.FC = () => {
                   
                   {/* Widgets List */}
                   <div className="flex-grow overflow-auto p-3">
-                    {!collapseSidebar && <h3 className="text-xs uppercase text-gray-500 font-semibold mb-2">Available Widgets</h3>}
+                    {!collapseSidebar && <h3 className="text-xs uppercase text-gray-500 dark:text-gray-400 font-semibold mb-2">Available Widgets</h3>}
                     
                     <div className="space-y-2">
                       {widgetOptions.map((widget) => (
@@ -372,7 +372,7 @@ const App: React.FC = () => {
                   
                   {/* Add Widget Button */}
                   {!collapseSidebar && (
-                    <div className="p-3 border-t border-gray-200">
+                    <div className="p-3 border-t border-gray-200 dark:border-gray-700">
                       <button 
                         onClick={handleAddRandomWidget}
                         className="w-full bg-blue-600 text-white rounded-md py-2 px-3 flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors"
@@ -400,7 +400,7 @@ const App: React.FC = () => {
             
             {/* WebSocket Tester Overlay */}
             {showTester && (
-              <div className="absolute inset-0 bg-white/90 z-50 p-5 overflow-auto">
+              <div className="absolute inset-0 bg-white/90 dark:bg-gray-900/95 z-50 p-5 overflow-auto text-gray-900 dark:text-gray-100">
                 <button 
                   onClick={() => setShowTester(false)}
                   className="fixed bottom-4 right-4 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md shadow-lg flex items-center gap-2"
@@ -414,18 +414,18 @@ const App: React.FC = () => {
             {/* ADDED: Render Simulator conditionally as a modal or overlay */}
             {showSimulator && (
               <div className="absolute inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50 p-4">
-                <div className="bg-white rounded-lg shadow-2xl w-full max-w-6xl h-full max-h-[90vh] overflow-hidden flex flex-col">
-                  <div className="p-4 border-b flex justify-between items-center">
-                    <h2 className="text-lg font-semibold text-gray-800">Widget Data Simulator</h2>
+                <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl w-full max-w-6xl h-full max-h-[90vh] overflow-hidden flex flex-col">
+                  <div className="p-4 border-b flex justify-between items-center border-gray-200 dark:border-gray-700">
+                    <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Widget Data Simulator</h2>
                     <button 
                       onClick={() => setShowSimulator(false)} 
-                      className="p-2 rounded-md hover:bg-gray-200 text-gray-600"
+                      className="p-2 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
                       title="Đóng Simulator"
                     >
-                      &times; {/* Hoặc một icon X */}
+                      &times;
                     </button>
                   </div>
-                  <div className="flex-grow overflow-y-auto"> {/* Ensure simulator content can scroll */}
+                  <div className="flex-grow overflow-y-auto">
                     <WidgetDataSimulator />
                   </div>
                 </div>
@@ -436,6 +436,6 @@ const App: React.FC = () => {
       </DndProvider>
     </GlobalAppProvider>
   );
-};
+}
 
 export default App;

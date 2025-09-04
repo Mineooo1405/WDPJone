@@ -214,7 +214,7 @@ const LogWidget: React.FC = () => {
   }
 
   return (
-    <div className="p-4 bg-gray-800 text-gray-200 rounded-lg shadow-xl h-full flex flex-col">
+  <div className="p-4 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-200 rounded-lg shadow-xl h-full flex flex-col">
       <WidgetConnectionHeader
         title={`Robot Logs (${selectedRobotId || 'Chưa chọn Robot'})`}
         statusTextOverride={derivedStatusText}

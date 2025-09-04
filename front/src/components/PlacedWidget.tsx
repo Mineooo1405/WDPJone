@@ -171,7 +171,7 @@ const PlacedWidget: React.FC<PlacedWidgetProps> = ({
   return (
     <div
       ref={widgetRef}
-      className="absolute bg-white border border-gray-300 rounded-lg shadow-lg overflow-hidden"
+      className="absolute bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg shadow-lg overflow-hidden"
       onClick={handleWidgetClick}
       style={{
         position: "absolute",
@@ -184,23 +184,23 @@ const PlacedWidget: React.FC<PlacedWidgetProps> = ({
     >
       {/* Widget Header */}
       <div
-        className="h-10 bg-slate-100 border-b border-slate-200 px-3 py-2 flex justify-between items-center cursor-move"
+        className="h-10 bg-slate-100 dark:bg-gray-700 border-b border-slate-200 dark:border-gray-600 px-3 py-2 flex justify-between items-center cursor-move"
         onMouseDown={handleDragStart}
       >
         <div className="flex items-center gap-2">
-          <Move size={14} className="text-slate-500" />
-          <h3 className="font-semibold text-sm text-slate-700">{getWidgetTitle()}</h3>
+          <Move size={14} className="text-slate-500 dark:text-gray-300" />
+          <h3 className="font-semibold text-sm text-slate-700 dark:text-gray-100">{getWidgetTitle()}</h3>
         </div>
         <button
           onClick={onRemove}
-          className="text-slate-500 hover:text-red-600 hover:bg-slate-200 p-1 rounded-full"
+          className="text-slate-500 dark:text-gray-300 hover:text-red-600 hover:bg-slate-200 dark:hover:bg-gray-600 p-1 rounded-full"
         >
           <X size={14} />
         </button>
       </div>
 
       {/* Widget Content */}
-      <div className="p-3 overflow-auto bg-white" style={{ height: "calc(100% - 40px)" }}>
+  <div className="p-3 overflow-auto bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100" style={{ height: "calc(100% - 40px)" }}>
         {renderContent()}
       </div>
 

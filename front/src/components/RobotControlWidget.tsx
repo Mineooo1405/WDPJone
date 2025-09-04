@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import WidgetConnectionHeader from "./WidgetConnectionHeader";
-import { RotateCcw, AlertCircle, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCw, RotateCcw as RotateCounter } from 'lucide-react';
-import { useRobotContext, ConnectedRobot } from './RobotContext';
+import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCw, RotateCcw as RotateCounter } from 'lucide-react';
+import { useRobotContext } from './RobotContext';
 import { useWebSocket } from '../contexts/WebSocketProvider';
 
 interface RPMData {
@@ -26,13 +26,7 @@ type WebSocketMessage = {
 };
 
 // Robot info as received from the bridge
-interface RobotInfo {
-  ip: string;
-  robot_id: string; // Typically same as IP for frontend identification
-  alias: string;
-  unique_key: string; // ip:port
-  status: string; // e.g., "connected"
-}
+// Removed unused RobotInfo interface
 
 // Định nghĩa keys cho điều khiển bàn phím
 type KeysPressed = {
@@ -45,30 +39,10 @@ type KeysPressed = {
 };
 
 // Interface cho Direct Command API (Keep for reference, but primarily using WebSocket commands)
-interface DirectCommandRequest {
-  ip: string;
-  port: number;
-  command: string;
-}
-
-interface DirectCommandResponse {
-  status: string;
-  message?: string;
-}
+// Removed unused direct command interfaces
 
 // Thêm interface cho giao tiếp qua robot_id
-interface RobotCommandRequest {
-  robot_id: string;
-  command: string;
-  payload: RobotCommandPayload;
-}
-
-interface RobotCommandResponse {
-  status: string;
-  message?: string;
-  robot_id?: string;
-  command_sent?: string; // For confirmation
-}
+// Removed unused RobotCommandRequest/Response
 
 // Add interface for IMU data state
 interface ImuData {
@@ -104,11 +78,11 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
   const [motorSpeeds, setMotorSpeeds] = useState<number[]>([0, 0, 0]);
   const [rpmValues, setRpmValues] = useState<RPMData>({1: 0, 2: 0, 3: 0});
   const [errorMessage, setErrorMessage] = useState<string>("");
-  const [statusMessage, setStatusMessage] = useState<string>("");
+  // Removed unused statusMessage state
   const [activeTab, setActiveTab] = useState<'joystick' | 'motors' | 'keyboard'>(compact ? 'keyboard' : 'keyboard');
   const [velocities, setVelocities] = useState({ x: 0, y: 0, theta: 0 });
-  const [maxSpeed, setMaxSpeed] = useState(1.0); 
-  const [maxAngular, setMaxAngular] = useState(2.0); 
+  const [maxSpeed] = useState(1.0); 
+  const [maxAngular] = useState(2.0); 
   const [keysPressed, setKeysPressed] = useState<KeysPressed>({ w: false, a: false, s: false, d: false, q: false, e: false });
   const [hasFocus, setHasFocus] = useState(false);
   const [commandSending, setCommandSending] = useState(false);
@@ -147,7 +121,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
     
     setCommandSending(true);
     setErrorMessage(""); 
-    setStatusMessage("Đang gửi lệnh...");
+  // status text handled via header state
 
     const messageToSend = {
       // Map high-level payload types to backend plaintext commands
@@ -158,7 +132,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
     };
     // console.log(`[RobotControlWidget] Sending command:`, messageToSend); // Bỏ comment nếu cần debug
     sendMessage(messageToSend);
-  }, [webSocketIsConnected, sendMessage, currentSelectedIp, selectedRobotId]);
+  }, [webSocketIsConnected, sendMessage, currentSelectedIp]);
   
   const throttledSendCommand = useCallback((payloadForRobot: RobotCommandPayload) => {
     if (!currentSelectedIp || !webSocketIsConnected) return;
@@ -197,22 +171,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
     throttledSendCommand({ type: "motor_speed", motor: motorId, speed: speed });
   }, [currentSelectedIp, webSocketIsConnected, throttledSendCommand]);
 
-  const emergencyStop = useCallback((): void => {
-    if (!currentSelectedIp || !webSocketIsConnected) {
-      setErrorMessage("Lỗi: Chọn robot và đảm bảo WebSocket kết nối."); 
-      return;
-    }
-    setMotorSpeeds([0, 0, 0]);
-    setVelocities({ x: 0, y: 0, theta: 0 });
-    prevVelocitiesRef.current = { x: 0, y: 0, theta: 0 };
-    setKeysPressed({ w: false, a: false, s: false, d: false, q: false, e: false });
-    if (knobRef.current) knobRef.current.style.transform = `translate(-50%, -50%)`;
-    if (rotationKnobRef.current) { 
-        const thumb = rotationKnobRef.current.querySelector('.thumb') as HTMLElement;
-        if (thumb) { thumb.style.left = `calc(50% - ${thumb.offsetWidth / 2}px)`; }
-    }
-    sendWsCommand({ type: "emergency_stop" });
-  }, [currentSelectedIp, webSocketIsConnected, sendWsCommand]);
+  // Emergency stop removed per request
 
   // --- START: Keyboard Control Logic (Step per key press) ---
   useEffect(() => {
@@ -550,11 +509,9 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
               setCommandSending(false); 
               if (message.status === 'error') {
                   setErrorMessage(message.message || "Lệnh thất bại.");
-                  setStatusMessage(""); 
+                  // clear status text
               } else if (message.status === 'success' || message.status === 'sent_to_robot') {
-                  setErrorMessage(""); 
-                  setStatusMessage(message.message || "Lệnh đã gửi.");
-                  setTimeout(() => setStatusMessage(""), 2000);
+                  setErrorMessage("");
               }
             }
             break;
@@ -580,7 +537,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
   const finalWidgetReady = webSocketIsConnected && !!currentSelectedIp;
 
   return (
-    <div className="p-4 bg-white rounded-lg shadow-md h-full flex flex-col">
+    <div className="p-4 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-lg shadow-md h-full flex flex-col">
       <WidgetConnectionHeader
         title="Robot Control"
         isConnected={finalWidgetReady}
@@ -589,8 +546,8 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
         hideConnectionControls={true}
       />
       
-      {finalWidgetReady && (
-          <div className="flex-shrink-0 grid grid-cols-3 gap-2 p-2 mb-3 border rounded-md bg-gray-50 text-xs">
+    {finalWidgetReady && (
+      <div className="flex-shrink-0 grid grid-cols-3 gap-2 p-2 mb-3 border rounded-md bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-xs">
              <div className="text-center">
                  <div className="font-medium text-gray-600">Position (X, Y, θ)</div>
                  <div className="font-mono">{robotPosition.x.toFixed(2)}, {robotPosition.y.toFixed(2)}, {(robotPosition.theta * 180 / Math.PI).toFixed(1)}°</div>
@@ -609,31 +566,31 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       )}
 
       {!compact && (
-        <div className="flex-shrink-0 flex justify-between mb-4 border-b">
+        <div className="flex-shrink-0 flex justify-between mb-4 border-b border-gray-200 dark:border-gray-700">
           <div className="flex items-center gap-1">
             <button 
               onClick={() => setActiveTab('keyboard')}
-              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'keyboard' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'keyboard' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300'}`}
               disabled={!finalWidgetReady}
             >
               Keyboard
             </button>
             <button 
               onClick={() => setActiveTab('joystick')}
-              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'joystick' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'joystick' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300'}`}
               disabled={!finalWidgetReady}
             >
               Joystick
             </button>
             <button 
               onClick={() => setActiveTab('motors')}
-              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'motors' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'motors' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300'}`}
               disabled={!finalWidgetReady}
             >
               Motors
             </button>
           </div>
-          <div className="flex items-center px-3 py-2 text-sm text-gray-600">
+          <div className="flex items-center px-3 py-2 text-sm text-gray-600 dark:text-gray-300">
             Robot: {selectedRobotId || "Chưa chọn"}
             {currentSelectedIp && ` (${currentSelectedIp})`}
           </div>
@@ -695,24 +652,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
                   W/S: Tiến/Lùi, A/D: Xoay Trái/Phải (hoặc Q/E)
             </div>
           </div>
-          
-            <div className="p-3 bg-gray-100 rounded-md">
-              <h4 className="font-medium text-sm mb-1">Lệnh Vận Tốc Hiện Tại</h4>
-              <div className="grid grid-cols-3 gap-2 text-center text-sm">
-              <div>
-                  <div className="text-xs text-gray-500">X (Ngang)</div>
-                  <div className="font-mono">{velocities.x.toFixed(2)}</div>
-              </div>
-              <div>
-                  <div className="text-xs text-gray-500">Y (Tiến/Lùi)</div>
-                  <div className="font-mono">{velocities.y.toFixed(2)}</div>
-              </div>
-              <div>
-                  <div className="text-xs text-gray-500">Theta (Xoay)</div>
-                  <div className="font-mono">{(velocities.theta * 180 / Math.PI).toFixed(1)}°/s</div>
-              </div>
-            </div>
-          </div>
+          {/* Velocity readouts removed per request */}
         </div>
       )}
       
@@ -758,14 +698,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
               </div>
               </div>
             </div>
-          <div className="mt-4 p-3 bg-gray-100 rounded-md">
-                 <h4 className="font-medium text-sm mb-1">Lệnh Vận Tốc Hiện Tại</h4>
-                 <div className="grid grid-cols-3 gap-2 text-center text-sm">
-                    <div><div className="text-xs text-gray-500">X</div><div className="font-mono">{velocities.x.toFixed(2)}</div></div>
-                    <div><div className="text-xs text-gray-500">Y</div><div className="font-mono">{velocities.y.toFixed(2)}</div></div>
-                    <div><div className="text-xs text-gray-500">Theta</div><div className="font-mono">{(velocities.theta * 180 / Math.PI).toFixed(1)}°/s</div></div>
-            </div>
-          </div>
+          {/* Velocity readouts removed per request */}
         </div>
       )}
       
@@ -829,16 +762,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       )}
           </div>
           
-      <div className="flex-shrink-0 mt-auto pt-4 border-t">
-      <button
-        onClick={emergencyStop}
-            disabled={!finalWidgetReady || commandSending} 
-            className="w-full bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded font-bold text-center disabled:bg-red-300 disabled:cursor-not-allowed"
-          >
-            <AlertCircle size={16} className="inline mr-2" />
-        EMERGENCY STOP
-      </button>
-      </div>
+  {/* Emergency Stop button removed per request */}
     </div>
   );
 };

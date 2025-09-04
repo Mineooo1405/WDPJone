@@ -228,7 +228,7 @@ const PIDControlWidget: React.FC = () => {
   }
 
   return (
-    <div className="p-4 bg-white rounded-lg shadow flex flex-col gap-3">
+    <div className="p-4 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-lg shadow flex flex-col gap-3">
       <WidgetConnectionHeader 
         title="Cấu hình PID" 
         isConnected={widgetReady}
@@ -238,11 +238,11 @@ const PIDControlWidget: React.FC = () => {
       />
       
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Motor</label>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Motor</label>
         <select
           value={motorId}
           onChange={(e) => setMotorId(parseInt(e.target.value))}
-          className="w-full p-2 border border-gray-300 rounded-md"
+          className="w-full p-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded-md"
           disabled={!widgetReady || isSending}
         >
           {[1, 2, 3].map(id => (
@@ -254,8 +254,8 @@ const PIDControlWidget: React.FC = () => {
       <div className="space-y-4">
         <div>
           <label className="flex justify-between">
-            <span className="text-sm font-medium text-gray-700">Kp (Tỉ lệ)</span>
-            <span className="text-sm text-gray-500">{pidValues.kp.toFixed(2)}</span>
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-200">Kp (Tỉ lệ)</span>
+            <span className="text-sm text-gray-500 dark:text-gray-400">{pidValues.kp.toFixed(2)}</span>
           </label>
           <input
             type="range"
@@ -265,7 +265,7 @@ const PIDControlWidget: React.FC = () => {
             step="0.01"
             value={pidValues.kp}
             onChange={handleChange}
-            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+        className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer"
             disabled={!widgetReady || isSending}
           />
           <input 
@@ -276,15 +276,15 @@ const PIDControlWidget: React.FC = () => {
             step="0.01"
             value={pidValues.kp}
             onChange={handleChange}
-            className="mt-1 w-full p-1 text-sm border border-gray-300 rounded-md"
+        className="mt-1 w-full p-1 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded-md"
             disabled={!widgetReady || isSending}
           />
         </div>
         
         <div>
           <label className="flex justify-between">
-            <span className="text-sm font-medium text-gray-700">Ki (Tích phân)</span>
-            <span className="text-sm text-gray-500">{pidValues.ki.toFixed(2)}</span>
+      <span className="text-sm font-medium text-gray-700 dark:text-gray-200">Ki (Tích phân)</span>
+      <span className="text-sm text-gray-500 dark:text-gray-400">{pidValues.ki.toFixed(2)}</span>
           </label>
           <input
             type="range"
@@ -294,7 +294,7 @@ const PIDControlWidget: React.FC = () => {
             step="0.01"
             value={pidValues.ki}
             onChange={handleChange}
-            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+        className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer"
             disabled={!widgetReady || isSending}
           />
           <input 
@@ -305,15 +305,15 @@ const PIDControlWidget: React.FC = () => {
             step="0.01"
             value={pidValues.ki}
             onChange={handleChange}
-            className="mt-1 w-full p-1 text-sm border border-gray-300 rounded-md"
+        className="mt-1 w-full p-1 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded-md"
             disabled={!widgetReady || isSending}
           />
         </div>
         
         <div>
           <label className="flex justify-between">
-            <span className="text-sm font-medium text-gray-700">Kd (Đạo hàm)</span>
-            <span className="text-sm text-gray-500">{pidValues.kd.toFixed(3)}</span>
+      <span className="text-sm font-medium text-gray-700 dark:text-gray-200">Kd (Đạo hàm)</span>
+      <span className="text-sm text-gray-500 dark:text-gray-400">{pidValues.kd.toFixed(3)}</span>
           </label>
           <input
             type="range"
@@ -323,7 +323,7 @@ const PIDControlWidget: React.FC = () => {
             step="0.001"
             value={pidValues.kd}
             onChange={handleChange}
-            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+        className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer"
             disabled={!widgetReady || isSending}
           />
           <input 
@@ -334,14 +334,14 @@ const PIDControlWidget: React.FC = () => {
             step="0.001"
             value={pidValues.kd}
             onChange={handleChange}
-            className="mt-1 w-full p-1 text-sm border border-gray-300 rounded-md"
+        className="mt-1 w-full p-1 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded-md"
             disabled={!widgetReady || isSending}
           />
         </div>
       </div>
       
       <div className="flex flex-col sm:flex-row gap-2 mt-2">
-        <button
+      <button
           onClick={sendPIDValuesToRobot}
           disabled={!widgetReady || isSending}
           className="flex-1 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-md flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -359,7 +359,7 @@ const PIDControlWidget: React.FC = () => {
           )}
         </button>
         
-        <button
+      <button
           onClick={loadPIDFromServer}
           disabled={!widgetReady || isSending}
           className="flex-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -368,7 +368,7 @@ const PIDControlWidget: React.FC = () => {
           <span>Tải từ Server</span>
         </button>
 
-        <button
+      <button
           onClick={triggerPIDTaskOnRobot} // Added this button
           disabled={!widgetReady || isSending}
           className="flex-1 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-md flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -381,7 +381,7 @@ const PIDControlWidget: React.FC = () => {
         <button
           onClick={resetToLocalDefaults}
           disabled={isSending} // Keep this disabled if any send operation is in progress
-          className="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 rounded-md flex items-center justify-center"
+          className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded-md flex items-center justify-center"
         >
           <RotateCcw size={14} />
         </button>
@@ -389,9 +389,9 @@ const PIDControlWidget: React.FC = () => {
       
       {commandStatus !== 'idle' && statusMessage && (
         <div className={`px-3 py-2 rounded text-sm flex items-center gap-1 mt-2 ${
-          commandStatus === 'success' ? 'bg-green-100 border border-green-400 text-green-700' :
-          commandStatus === 'error' ? 'bg-red-100 border border-red-400 text-red-700' :
-          'bg-blue-100 border border-blue-400 text-blue-700'
+          commandStatus === 'success' ? 'bg-green-100 dark:bg-green-900/30 border border-green-400 dark:border-green-700 text-green-700 dark:text-green-200' :
+          commandStatus === 'error' ? 'bg-red-100 dark:bg-red-900/30 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-200' :
+          'bg-blue-100 dark:bg-blue-900/30 border border-blue-400 dark:border-blue-700 text-blue-700 dark:text-blue-200'
         }`}>
           {commandStatus === 'success' && <Save size={14} />}
           {commandStatus === 'error' && <AlertTriangle size={14} />}

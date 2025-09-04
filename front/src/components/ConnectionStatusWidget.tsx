@@ -29,9 +29,9 @@ const ConnectionStatusWidget: React.FC = () => {
     // Trường hợp isConnected = false và không có error (đang cố kết nối lại hoặc chưa kết nối ban đầu)
     statusText = 'Đã ngắt kết nối'; // Hoặc 'Đang chờ kết nối...'
     StatusIcon = WifiOff;
-    iconColor = 'text-gray-500';
-    bgColor = 'bg-gray-100';
-    textColor = 'text-gray-700';
+  iconColor = 'text-gray-500 dark:text-gray-300';
+  bgColor = 'bg-gray-100 dark:bg-gray-700';
+  textColor = 'text-gray-700 dark:text-gray-200';
       }
 
   // Nếu bạn muốn giữ lại CSS riêng, có thể dùng các class CSS cũ ở đây

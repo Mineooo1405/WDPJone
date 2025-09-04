@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRobotContext } from './RobotContext';
 import { ReadyState } from 'react-use-websocket';
 import WidgetConnectionHeader from './WidgetConnectionHeader';
-import { Play, Pause, RotateCcw, Download } from 'lucide-react';
+import { RotateCcw, Download } from 'lucide-react';
 import { Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -228,7 +228,6 @@ const IMUWidget: React.FC = () => {
 
   const [currentImuData, setCurrentImuData] = useState<ImuData | null>(null);
   const [widgetError, setWidgetError] = useState<string | null>(null);
-  const [liveUpdate, setLiveUpdate] = useState(false);
   const [activeChart, setActiveChart] = useState<'orientation' | 'quaternion'>('orientation');
   
   const messageBuffer = useRef<ImuData[]>([]);
@@ -242,7 +241,7 @@ const IMUWidget: React.FC = () => {
   });
 
   const chartRef = useRef<any>(null);
-  const [isPaused, setIsPaused] = useState(false);
+  // Removed pause/freeze; chart updates continuously
 
   const subscribedToRobotRef = useRef<string | null>(null);
 
@@ -265,9 +264,8 @@ const IMUWidget: React.FC = () => {
     if (newMessages.length > 0) {
       const latestMessage = newMessages[newMessages.length - 1];
       setCurrentImuData(latestMessage); // Update current display data
-      
-      if (!isPaused) {
-        setHistory(prev => {
+
+      setHistory(prev => {
           const newTimestamps = newMessages.map(msg => formatTimestampForChart(msg.timestamp));
           const newRolls = newMessages.map(msg => msg.roll);
           const newPitches = newMessages.map(msg => msg.pitch);
@@ -292,9 +290,8 @@ const IMUWidget: React.FC = () => {
             }
           };
         });
-      }
     }
-  }, [isPaused]);
+  }, []);
 
   const scheduleUIUpdate = useCallback(() => {
     if (animationFrameId.current !== null) return;
@@ -318,7 +315,7 @@ const IMUWidget: React.FC = () => {
         return;
       }
 
-      if (message.type === 'imu_data' && message.data) { // Check for message.data
+  if (message.type === 'imu_data' && message.data) { // Check for message.data
         const imuPayload = message.data; // This is the object with euler, quaternion, etc.
 
         // Create a new ImuData object by extracting values from imuPayload
@@ -340,10 +337,9 @@ const IMUWidget: React.FC = () => {
           calibrated: currentImuData?.calibrated ?? false 
         };
 
-        if (liveUpdate) { // if liveUpdate is true, push to buffer regardless of isPaused
-          messageBuffer.current.push(newImuEntry);
-          scheduleUIUpdate(); // Schedule UI update, processMessageBuffer will check isPaused
-        }
+  // Always buffer and schedule UI updates
+  messageBuffer.current.push(newImuEntry);
+  scheduleUIUpdate();
         // Update currentImuData to show the latest values even if paused, 
         // so when unpaused, it doesn't jump from very old data.
         setCurrentImuData(newImuEntry);
@@ -364,85 +360,40 @@ const IMUWidget: React.FC = () => {
         setWidgetError(message.message || 'Unknown error from IMU data stream');
       }
     }
-  }, [lastJsonMessage, selectedRobotId, liveUpdate, currentImuData, scheduleUIUpdate]); // Added currentImuData & scheduleUIUpdate
+  }, [lastJsonMessage, selectedRobotId, currentImuData, scheduleUIUpdate]);
 
-  // Effect for subscribing and unsubscribing to IMU data
+  // Effect for subscribing and unsubscribing to IMU data (always live when connected)
   useEffect(() => {
     if (!selectedRobotId || readyState !== ReadyState.OPEN) {
       if (subscribedToRobotRef.current) {
-        console.log(`IMUWidget: WS not ready or no robot. Attempting to unsubscribe from ${subscribedToRobotRef.current}`);
-        sendJsonMessage({
-          command: "unsubscribe",
-          type: "imu_data",
-          robot_alias: subscribedToRobotRef.current
-        });
+        sendJsonMessage({ command: "unsubscribe", type: "imu_data", robot_alias: subscribedToRobotRef.current });
         subscribedToRobotRef.current = null;
         clearHistoryAndData();
       }
       return;
     }
 
-    if (liveUpdate) {
-      if (subscribedToRobotRef.current && subscribedToRobotRef.current !== selectedRobotId) {
-        console.log(`IMUWidget: Robot changed. Unsubscribing from ${subscribedToRobotRef.current}`);
-        sendJsonMessage({
-          command: "unsubscribe",
-          type: "imu_data",
-          robot_alias: subscribedToRobotRef.current
-        });
-        clearHistoryAndData();
-        subscribedToRobotRef.current = null;
-      }
-      if (subscribedToRobotRef.current !== selectedRobotId) {
-        console.log(`IMUWidget: Subscribing to imu_data for ${selectedRobotId}`);
-        sendJsonMessage({
-          command: "subscribe",
-          type: "imu_data",
-          robot_alias: selectedRobotId
-        });
-        subscribedToRobotRef.current = selectedRobotId;
-        clearHistoryAndData();
-      }
-    } else {
-      if (subscribedToRobotRef.current === selectedRobotId) {
-        console.log(`IMUWidget: Live update off. Unsubscribing from ${selectedRobotId}`);
-        sendJsonMessage({
-          command: "unsubscribe",
-          type: "imu_data",
-          robot_alias: selectedRobotId
-        });
-        subscribedToRobotRef.current = null;
-      }
+    if (subscribedToRobotRef.current && subscribedToRobotRef.current !== selectedRobotId) {
+      // Robot changed: unsubscribe previous
+      sendJsonMessage({ command: "unsubscribe", type: "imu_data", robot_alias: subscribedToRobotRef.current });
+      clearHistoryAndData();
+      subscribedToRobotRef.current = null;
+    }
+    if (subscribedToRobotRef.current !== selectedRobotId) {
+      sendJsonMessage({ command: "subscribe", type: "imu_data", robot_alias: selectedRobotId });
+      subscribedToRobotRef.current = selectedRobotId;
+      clearHistoryAndData();
     }
 
     return () => {
       if (subscribedToRobotRef.current && readyState === ReadyState.OPEN) {
-        console.log(`IMUWidget: Cleanup. Unsubscribing from ${subscribedToRobotRef.current}`);
-        sendJsonMessage({
-          command: "unsubscribe",
-          type: "imu_data",
-          robot_alias: subscribedToRobotRef.current
-        });
+        sendJsonMessage({ command: "unsubscribe", type: "imu_data", robot_alias: subscribedToRobotRef.current });
         subscribedToRobotRef.current = null;
       }
     };
-  }, [selectedRobotId, liveUpdate, readyState, sendJsonMessage]);
+  }, [selectedRobotId, readyState, sendJsonMessage]);
 
-  const toggleLiveUpdate = useCallback(() => {
-    if (readyState !== ReadyState.OPEN) {
-      setWidgetError("WebSocket không kết nối.");
-      return;
-    }
-    if (!selectedRobotId) {
-      setWidgetError("Chưa chọn robot.");
-      return;
-    }
-    
-    const newLiveStatus = !liveUpdate;
-    setLiveUpdate(newLiveStatus);
-    setWidgetError(null);
-
-  }, [liveUpdate, selectedRobotId, readyState]);
+  // Removed toggleLiveUpdate; always live
 
   useEffect(() => {
     const intervalId = setInterval(scheduleUIUpdate, UI_UPDATE_INTERVAL);
@@ -489,7 +440,7 @@ const IMUWidget: React.FC = () => {
   };
 
   const resetZoom = () => chartRef.current?.resetZoom();
-  const toggleChartPause = useCallback(() => setIsPaused(prev => !prev), []);
+  // Removed freeze chart toggle
 
   // Chart configurations (similar to EncoderDataWidget, adapted for IMU)
   const chartDataConfig = {
@@ -532,10 +483,8 @@ const IMUWidget: React.FC = () => {
     derivedStatusText = "WS: Disconnected";
   } else if (!selectedRobotId) {
     derivedStatusText = "No robot selected";
-  } else if (liveUpdate) {
-    derivedStatusText = "Live Update Active";
   } else {
-    derivedStatusText = "Connected (Idle)";
+    derivedStatusText = "Connected";
   }
 
   return (
@@ -548,23 +497,7 @@ const IMUWidget: React.FC = () => {
         // showConnectButton and connectButtonText props removed temporarily
       />
 
-      <div className="flex gap-2 mb-4 items-center flex-wrap">
-        <button
-          onClick={toggleLiveUpdate}
-          disabled={readyState !== ReadyState.OPEN || !selectedRobotId}
-          className={`px-3 py-1.5 rounded-md flex items-center gap-1 disabled:opacity-50 ${liveUpdate ? 'bg-red-600 hover:bg-red-700' : 'bg-green-600 hover:bg-green-700'} text-white`}
-        >
-          {liveUpdate ? <Pause size={14} /> : <Play size={14} />}
-          <span>{liveUpdate ? 'Stop Live' : 'Start Live'}</span>
-        </button>
-        <button
-          onClick={toggleChartPause}
-          disabled={!liveUpdate || readyState !== ReadyState.OPEN || !selectedRobotId}
-          className={`px-3 py-1.5 rounded-md flex items-center gap-1 disabled:opacity-50 ${isPaused ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-blue-600 hover:bg-blue-700'} text-white`}
-        >
-          {isPaused ? <Play size={14} /> : <Pause size={14} />}
-          <span>{isPaused ? 'Resume Chart' : 'Freeze Chart'}</span>
-        </button>
+  <div className="flex gap-2 mb-4 items-center flex-wrap">
         <button
           onClick={clearHistoryAndData}
           className="px-3 py-1.5 bg-gray-600 text-white rounded-md flex items-center gap-1 hover:bg-gray-700 disabled:opacity-50"
@@ -643,17 +576,11 @@ const IMUWidget: React.FC = () => {
             </div>
           </div>
         <div className="relative h-64 md:h-72"> {/* Fixed height for chart area */}
-          {history.timestamps.length > 0 ? (
+      {history.timestamps.length > 0 ? (
             <Line data={chartDataConfig} options={chartOptionsConfig} ref={chartRef} />
           ) : (
             <div className="h-full flex items-center justify-center text-gray-500 border border-dashed border-gray-600 rounded-md">
-              { /* widgetLoading ? "Đang tải..." : */ // widgetLoading was removed
-                readyState !== ReadyState.OPEN ? "WebSocket chưa kết nối.":
-                !selectedRobotId ? "Vui lòng chọn một robot." :
-                !liveUpdate && history.timestamps.length === 0 ? "Nhấn 'Start Live' để xem dữ liệu IMU." :
-                liveUpdate && history.timestamps.length === 0 ? "Đang chờ dữ liệu IMU..." :
-                "Không có dữ liệu để hiển thị."
-              }
+        {readyState !== ReadyState.OPEN ? "WebSocket chưa kết nối." : !selectedRobotId ? "Vui lòng chọn một robot." : "Đang chờ dữ liệu IMU..."}
             </div>
           )}
         </div>

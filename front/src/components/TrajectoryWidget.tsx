@@ -32,7 +32,7 @@ interface RobotPose extends TrajectoryPoint {}
 const MAX_PATH_POINTS_DISPLAY = 500; // Max points to keep in the chart for performance
 
 const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
-  const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
+  const { selectedRobotId, setSelectedRobotId, connectedRobots, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
   const { firmwareUpdateMode } = useContext(GlobalAppContext);
 
   const chartRef = useRef<ChartJS<'line', TrajectoryPoint[], unknown> | null>(null);
@@ -387,7 +387,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
   }
 
   return (
-    <div className={`flex flex-col h-full ${compact ? 'p-2' : 'p-3'} bg-gray-800 text-gray-200 rounded-lg shadow-xl`}>
+  <div className={`flex flex-col h-full ${compact ? 'p-2' : 'p-3'} bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-200 rounded-lg shadow-xl`}>
       <WidgetConnectionHeader
         title={`Real-time Trajectory (${selectedRobotId || 'No Robot'})`}
         statusTextOverride={derivedStatusText}
@@ -395,8 +395,33 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
         error={widgetError}
       />
 
-      {!compact && (
-        <div className="flex gap-2 mb-2 items-center flex-wrap">
+      <div className={`flex gap-2 mb-2 items-center flex-wrap ${compact ? 'mt-1' : ''}`}>
+        {/* Follow buttons for connected robots */}
+        {connectedRobots && connectedRobots.length > 0 && (
+          <div className="flex items-center gap-1 flex-wrap">
+            {connectedRobots.map((r) => {
+              const isActive = r.alias === selectedRobotId;
+              return (
+                <button
+                  key={r.key || r.alias}
+                  onClick={() => !firmwareUpdateMode && setSelectedRobotId(r.alias)}
+                  className={`px-2 py-1 rounded-md text-xs border transition-colors ${
+                    isActive
+                      ? 'bg-emerald-600 text-white border-emerald-700'
+                      : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 border-gray-300 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600'
+                  } ${firmwareUpdateMode ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  disabled={firmwareUpdateMode}
+                  title={r.ip}
+                >
+                  {r.alias}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Utility controls */}
+        <div className="flex items-center gap-2 ml-auto">
           <button
             onClick={resetZoom}
             className="px-3 py-1.5 bg-blue-600 text-white rounded-md flex items-center gap-1 hover:bg-blue-700 disabled:opacity-50 text-xs"
@@ -412,7 +437,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
             <RotateCcw size={14} /> Clear Path
           </button>
         </div>
-      )}
+      </div>
 
       {widgetError && (
         <div className="bg-red-100 border border-red-400 text-red-700 px-3 py-2 rounded relative mb-2 text-xs" role="alert">

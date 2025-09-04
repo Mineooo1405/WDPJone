@@ -379,7 +379,7 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
   };
 
   return (
-    <div className={`flex flex-col h-full ${compact ? 'p-2' : 'p-4'} bg-gray-800 text-gray-200 rounded-lg shadow-xl`}>
+  <div className={`flex flex-col h-full ${compact ? 'p-2' : 'p-4'} bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-200 rounded-lg shadow-xl`}>
       <WidgetConnectionHeader
         title={`Encoder Data (${selectedRobotId || 'Chưa chọn Robot'})`}
         statusTextOverride={derivedStatusText}

@@ -28,7 +28,7 @@ const DraggableWidget: React.FC<DraggableWidgetProps> = ({ widget, collapsed }) 
   return (
     <div 
       ref={drag as any}
-      className={`bg-white border border-gray-200 rounded-md p-2 
+          className={`bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-2 
                  hover:border-blue-400 hover:shadow-sm cursor-move transition-all 
                  select-none ${isDragging ? 'opacity-50 shadow-lg scale-105' : 'opacity-100'}`}
     >

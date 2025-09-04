@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react"; // Removed useContext
-import { Upload, AlertCircle, Check, RefreshCw, Wifi, Network, Plug, Power, 
-         Zap, FileType, Terminal, History, Info, ArrowRight, Clock, Download, 
+import { Upload, RefreshCw,
+         Zap, FileType, Terminal, History, Info, Clock, Download,
          CheckCircle, XCircle, HelpCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { useWebSocket } from '../contexts/WebSocketProvider';
 import { useRobotContext } from './RobotContext';
@@ -26,7 +26,7 @@ interface FirmwareMessage {
   total_chunks?: number;
   data?: string;
   binary_format?: boolean; 
-  status?: 'success' | 'error' | 'connected' | 'disconnected' | 'firmware_prepared_for_ota' | 'ota_progress' | 'ota_complete' | 'ota_failed' | 'firmware_chunk_ack'; // Added more specific statuses
+  status?: 'success' | 'error' | 'connected' | 'disconnected' | 'firmware_prepared_for_ota' | 'ota_progress' | 'ota_complete' | 'ota_failed' | 'firmware_chunk_ack' | 'client_connected';
   message?: string;
   progress?: number;
   build_date?: string;
@@ -71,14 +71,14 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
   >('idle');
   const [progress, setProgress] = useState(0);
   const [errorMessage, setErrorMessage] = useState('');
-  const [currentVersion, setCurrentVersion] = useState('1.0.0');
+  const [currentVersion, setCurrentVersion] = useState('');
   const [showLogs, setShowLogs] = useState(false);
   const [updateLogs, setUpdateLogs] = useState<string[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [firmwareHistory, setFirmwareHistory] = useState<FirmwareHistory[]>([]);
   const [uploadStartTime, setUploadStartTime] = useState<number | null>(null);
   const [uploadBitrate, setUploadBitrate] = useState<number | null>(null);
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  // Removed advanced toggle UI per request
   const [firmwareInfo, setFirmwareInfo] = useState<{
     buildDate?: string;
     deviceTarget?: string;
@@ -509,34 +509,27 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
   };
 
   return (
-    <div className="bg-white p-4 rounded-lg shadow border h-full flex flex-col overflow-hidden">
-      <h3 className="text-lg font-medium mb-4 flex items-center justify-between">
+    <div className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 p-4 rounded-lg shadow border border-gray-200 dark:border-gray-700 h-full flex flex-col overflow-hidden">
+  <h3 className="text-lg font-medium mb-4 flex items-center justify-between">
         <span>Cập Nhật Firmware</span>
-        <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gray-700">Chế độ OTA:</span>
+    <div className="flex items-center gap-2">
+      <span className="text-sm font-medium text-gray-700 dark:text-gray-200">Chế độ OTA:</span>
             <select 
                 value={otaType || ''} 
                 onChange={(e) => setOtaType(e.target.value as 'OTA0' | 'OTA1')} 
-                className="px-2 py-1 border border-gray-300 rounded-md text-sm"
+        className="px-2 py-1 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm text-gray-900 dark:text-gray-100 rounded-md"
             >
                 <option value="">Chọn chế độ...</option>
                 <option value="OTA0">OTA0 (Robot tự vào OTA)</option>
                 <option value="OTA1">OTA1 (Server gửi lệnh "Upgrade")</option>
             </select>
         </div>
-        <button
-          onClick={() => setShowAdvanced(!showAdvanced)}
-          className="text-xs flex items-center gap-1 px-2 py-1 bg-gray-100 rounded-md hover:bg-gray-200"
-        >
-          {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          <span>{showAdvanced ? "Cơ bản" : "Nâng cao"}</span>
-        </button>
       </h3>
 
       {/* OTA0 Specific: Input for Expected IP */}
       {otaType === 'OTA0' && (
-        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
-          <label htmlFor="expectedOta0Ip" className="block text-sm font-medium text-yellow-700 mb-1">
+        <div className="mb-4 p-3 bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-700 rounded-md">
+          <label htmlFor="expectedOta0Ip" className="block text-sm font-medium text-yellow-700 dark:text-yellow-200 mb-1">
             Địa chỉ IP Robot Dự Kiến (cho OTA0 tức thời)
           </label>
           <input 
@@ -545,10 +538,10 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
             value={expectedOta0Ip}
             onChange={(e) => setExpectedOta0Ip(e.target.value.trim())}
             placeholder="Ví dụ: 192.168.1.11"
-            className="w-full px-3 py-2 border border-yellow-300 rounded-md shadow-sm focus:ring-yellow-500 focus:border-yellow-500 sm:text-sm"
+            className="w-full px-3 py-2 border border-yellow-300 dark:border-yellow-700 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded-md shadow-sm focus:ring-yellow-500 focus:border-yellow-500 sm:text-sm"
             disabled={otaStatus === 'uploading_to_bridge' || otaStatus === 'bridge_ready_for_robot'}
           />
-          <p className="text-xs text-yellow-600 mt-1">
+          <p className="text-xs text-yellow-600 dark:text-yellow-300 mt-1">
             Điền IP của robot OTA0 nếu bạn muốn chuẩn bị firmware trước khi robot hiển thị trong danh sách.
           </p>
         </div>
@@ -556,11 +549,15 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
 
       <div className="flex gap-4 mb-4">
         <div className="flex-1">
-          <div className="mb-4 flex items-center bg-blue-50 p-3 rounded-md text-blue-700">
+          <div className="mb-4 flex items-center bg-blue-50 dark:bg-blue-900/30 p-3 rounded-md text-blue-700 dark:text-blue-200">
             <Info size={20} className="mr-2 flex-shrink-0" />
             <div className="flex-1">
-              <p className="font-medium">Robot: {selectedRobotId || "Chưa chọn"} (IP mục tiêu: {targetRobotForOtaIp || "N/A"})</p>
-              <p className="text-sm">Phiên bản hiện tại: {currentVersion}</p>
+              {(selectedRobotId || targetRobotForOtaIp) && (
+                <p className="font-medium">Robot: {selectedRobotId} {targetRobotForOtaIp ? `(IP mục tiêu: ${targetRobotForOtaIp})` : ''}</p>
+              )}
+              {currentVersion && (
+                <p className="text-sm">Phiên bản hiện tại: {currentVersion}</p>
+              )}
               
               {firmwareInfo.buildDate && (
                 <p className="text-xs mt-1">Build date: {firmwareInfo.buildDate}</p>
@@ -572,7 +569,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
             </div>
             <button
               onClick={checkCurrentVersion}
-              className="ml-auto p-1 hover:bg-blue-100 rounded-full flex-shrink-0"
+        className="ml-auto p-1 hover:bg-blue-100 dark:hover:bg-blue-800/50 rounded-full flex-shrink-0"
               title="Kiểm tra phiên bản"
               disabled={!webSocketIsConnected}
             >
@@ -580,7 +577,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
             </button>
           </div>
 
-          <div className="mb-4 flex items-center justify-between bg-gray-50 p-3 rounded-md">
+      <div className="mb-4 flex items-center justify-between bg-gray-50 dark:bg-gray-700 p-3 rounded-md">
             <div className="flex items-center">
               <div className={`w-3 h-3 rounded-full mr-2 ${webSocketIsConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
               <span>{webSocketIsConnected ? 'Đã kết nối tới DirectBridge' : 'Chưa kết nối'}</span>
@@ -589,7 +586,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
             {!webSocketIsConnected && (
               <button
                 onClick={() => { /*sendMessage({type: 'request_connect'}) or rely on auto-reconnect of WebSocketProvider */ }} 
-                className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
+        className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
               >
                 Kết nối
               </button>
@@ -597,7 +594,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
           </div>
 
           <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+      <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
               Chọn file firmware (.bin)
             </label>
             <div className="flex items-center">
@@ -611,25 +608,25 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
               />
               <label
                 htmlFor="firmware-file"
-                className="px-4 py-2 bg-gray-100 text-gray-800 rounded-l-md hover:bg-gray-200 cursor-pointer"
+        className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-100 rounded-l-md hover:bg-gray-200 dark:hover:bg-gray-600 cursor-pointer"
               >
                 Chọn file
               </label>
-              <div className="flex-grow px-3 py-2 bg-gray-50 rounded-r-md border-l truncate">
+        <div className="flex-grow px-3 py-2 bg-gray-50 dark:bg-gray-700 rounded-r-md border-l border-gray-200 dark:border-gray-600 truncate">
                 {selectedFile ? selectedFile.name : 'Chưa có file nào được chọn'}
               </div>
             </div>
           </div>
 
           {/* OTA server status (simple view like Omni_Server) */}
-          <div className="mb-4 flex items-center justify-between bg-gray-50 p-3 rounded-md">
+      <div className="mb-4 flex items-center justify-between bg-gray-50 dark:bg-gray-700 p-3 rounded-md">
             <div className="flex items-center gap-4">
               <div className="flex items-center">
-                <span className="mr-2 text-sm text-gray-600">OTA Port:</span>
+        <span className="mr-2 text-sm text-gray-600 dark:text-gray-300">OTA Port:</span>
                 <span className="font-mono text-sm">{otaServerPort ?? 12345}</span>
               </div>
               <div className="flex items-center">
-                <div className={`w-3 h-3 rounded-full mr-2 ${otaClientConnected ? 'bg-green-500' : 'bg-gray-400'}`}></div>
+        <div className={`w-3 h-3 rounded-full mr-2 ${otaClientConnected ? 'bg-green-500' : 'bg-gray-400 dark:bg-gray-500'}`}></div>
                 <span className="text-sm">{otaClientConnected ? 'Robot đã kết nối OTA' : 'Đang chờ robot kết nối OTA'}</span>
               </div>
             </div>
@@ -637,7 +634,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
 
           {/* OTA0 Path Guidance */}
           {otaStatus === 'robot_selected_for_ota0' && otaType === 'OTA0' && targetRobotForOtaIp && (
-            <div className="mb-4 bg-blue-50 border-l-4 border-blue-500 text-blue-700 p-3 rounded">
+            <div className="mb-4 bg-blue-50 dark:bg-blue-900/30 border-l-4 border-blue-500 dark:border-blue-700 text-blue-700 dark:text-blue-200 p-3 rounded">
               <p className="font-medium">Chế độ OTA0: Robot mục tiêu IP {targetRobotForOtaIp}.</p>
               <p>Vui lòng chọn file firmware để tiếp tục.</p>
             </div>
@@ -645,7 +642,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
 
           {/* OTA1 Path Guidance: Step 1 - Robot Selected, Ready to Command Upgrade */}
           {!compact && otaStatus === 'robot_selected_for_ota1' && otaType === 'OTA1' && targetRobotForOtaIp && (
-            <div className="mb-4 bg-orange-50 border-l-4 border-orange-500 text-orange-700 p-3 rounded">
+            <div className="mb-4 bg-orange-50 dark:bg-orange-900/30 border-l-4 border-orange-500 dark:border-orange-700 text-orange-700 dark:text-orange-200 p-3 rounded">
               <p className="font-medium">Chế độ OTA1: Robot mục tiêu IP {targetRobotForOtaIp}.</p>
               <p>Nhấn "Yêu cầu Robot vào Chế Độ Nâng Cấp (OTA1)" để robot chuẩn bị nhận firmware.</p>
             </div>
@@ -653,22 +650,16 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
 
           {/* OTA1 Path Guidance: Step 2 - Upgrade Command Sent, Ready to Select File & Upload */}
           {!compact && otaStatus === 'ota1_upgrade_command_sent' && otaType === 'OTA1' && targetRobotForOtaIp && (
-            <div className="mb-4 bg-yellow-50 border-l-4 border-yellow-500 text-yellow-700 p-3 rounded">
+            <div className="mb-4 bg-yellow-50 dark:bg-yellow-900/30 border-l-4 border-yellow-500 dark:border-yellow-700 text-yellow-700 dark:text-yellow-200 p-3 rounded">
               <p className="font-medium">Đã gửi lệnh "Upgrade" cho Robot {targetRobotForOtaIp} (OTA1)!</p>
               <p>Robot nên khởi động lại vào chế độ OTA. Tiếp theo, chọn file firmware (nếu chưa) và nhấn "Tải Firmware lên Server...".</p>
             </div>
           )}
 
-          {otaStatus === 'file_selected' && targetRobotForOtaIp && selectedFile && (
-            <div className="mb-4 bg-green-50 border-l-4 border-green-500 text-green-700 p-3 rounded">
-              <p className="font-medium">Sẵn sàng tải lên!</p>
-              <p>File: {selectedFile.name}. Robot IP: {targetRobotForOtaIp}. Chế độ: {otaType}.</p>
-              <p>Nhấn "Tải Firmware lên Server cho Robot {targetRobotForOtaIp}" để tiếp tục.</p>
-            </div>
-          )}
+          {/* Removed green 'ready to upload' strip per request */}
           
           {otaStatus === 'bridge_ready_for_robot' && targetRobotForOtaIp && (
-            <div className="mb-4 bg-blue-50 border-l-4 border-blue-500 text-blue-700 p-3 rounded">
+            <div className="mb-4 bg-blue-50 dark:bg-blue-900/30 border-l-4 border-blue-500 dark:border-blue-700 text-blue-700 dark:text-blue-200 p-3 rounded">
               <p className="font-medium">Firmware đã sẵn sàng trên Server!</p>
               <p>Firmware đã được chuẩn bị cho robot {targetRobotForOtaIp}.</p>
               <p className="mt-1 font-semibold">Vui lòng khởi động lại robot {targetRobotForOtaIp} để bắt đầu quá trình cập nhật OTA.</p>
@@ -681,7 +672,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                 <span>Đang tải file lên server cho {targetRobotForOtaIp}...</span>
                 <span>{progress.toFixed(0)}%</span>
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
+              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
                 <div
                   className="bg-blue-600 h-2 rounded-full"
                   style={{ width: `${progress}%` }}
@@ -689,7 +680,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
               </div>
               
               {uploadBitrate !== null && (
-                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 mt-1">
                   <span>Tốc độ: {uploadBitrate.toFixed(1)} KB/s</span>
                   {uploadStartTime && (
                     <span>Thời gian: {((Date.now() - uploadStartTime) / 1000).toFixed(1)}s</span>
@@ -700,7 +691,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
           )}
 
           {otaStatus === 'error' && (
-            <div className="mb-4 bg-red-50 border-l-4 border-red-500 text-red-700 p-3 rounded">
+            <div className="mb-4 bg-red-50 dark:bg-red-900/30 border-l-4 border-red-500 dark:border-red-700 text-red-700 dark:text-red-200 p-3 rounded">
               <p className="font-medium">Lỗi</p>
               <p>{errorMessage}</p>
             </div>
@@ -729,7 +720,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                     (otaType === 'OTA1' && (otaStatus === 'file_selected' || otaClientConnected))
                   )
               )}
-              className={`px-4 py-2 rounded-md flex items-center gap-2
+        className={`px-4 py-2 rounded-md flex items-center gap-2
                 ${ 
                   !(
                     webSocketIsConnected &&
@@ -737,7 +728,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                     selectedFile &&
                     ((otaType === 'OTA0' && otaStatus === 'file_selected') || (otaType === 'OTA1' && (otaStatus === 'file_selected' || otaClientConnected)))
                    )
-                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+          ? 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
                     : 'bg-blue-600 text-white hover:bg-blue-700'
                 }`}
             >
@@ -760,7 +751,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
         <div className="flex-1 flex flex-col">
           <div className="flex items-center justify-between mb-2">
             <div 
-              className="flex items-center gap-1 cursor-pointer hover:bg-gray-100 px-2 py-1 rounded-md"
+              className="flex items-center gap-1 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 px-2 py-1 rounded-md"
               onClick={() => setShowLogs(!showLogs)}
             >
               <Terminal size={16} />
@@ -771,14 +762,14 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
               <div className="flex gap-1">
                 <button
                   onClick={copyLogs}
-                  className="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200 flex items-center gap-1"
+                  className="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 flex items-center gap-1"
                 >
                   <Download size={12} />
                   <span>Copy</span>
                 </button>
                 <button
                   onClick={() => setUpdateLogs([])}
-                  className="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200"
+                  className="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600"
                 >
                   Clear
                 </button>
@@ -798,7 +789,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                   </div>
                 ))
               ) : (
-                <div className="text-gray-500 italic">
+                <div className="text-gray-500 dark:text-gray-400 italic">
                   Chưa có logs nào. Hãy thực hiện các thao tác để xem logs.
                 </div>
               )}
@@ -807,7 +798,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
           
           <div className="flex items-center justify-between mb-2 mt-2">
             <div 
-              className="flex items-center gap-1 cursor-pointer hover:bg-gray-100 px-2 py-1 rounded-md"
+              className="flex items-center gap-1 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 px-2 py-1 rounded-md"
               onClick={() => setShowHistory(!showHistory)}
             >
               <History size={16} />
@@ -817,15 +808,15 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
           </div>
           
           {showHistory && (
-            <div className="flex-grow overflow-y-auto border rounded-md">
+            <div className="flex-grow overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-md">
               {firmwareHistory.length > 0 ? (
-                <div className="divide-y">
+                <div className="divide-y divide-gray-200 dark:divide-gray-700">
                   {firmwareHistory.map((item, index) => (
-                    <div key={index} className="p-2 hover:bg-gray-50">
+                    <div key={index} className="p-2 hover:bg-gray-50 dark:hover:bg-gray-700">
                       <div className="flex items-center justify-between">
                         <div className="font-medium">{item.version}</div>
                         <div className={`text-xs px-2 py-0.5 rounded-full 
-                          ${item.status === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                          ${item.status === 'success' ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200' : 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200'}`}>
                           {item.status === 'success' ? (
                             <span className="flex items-center gap-1">
                               <CheckCircle size={12} />
@@ -839,7 +830,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                           )}
                         </div>
                       </div>
-                      <div className="text-xs text-gray-500 mt-1 flex items-center">
+                      <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center">
                         <Clock size={12} className="mr-1" />
                         {formatDate(item.timestamp)}
                       </div>
@@ -850,7 +841,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                         </div>
                       )}
                       {item.duration && (
-                        <div className="text-xs text-gray-600 mt-1">
+                        <div className="text-xs text-gray-600 dark:text-gray-300 mt-1">
                           Thời gian: {item.duration.toFixed(1)} giây
                         </div>
                       )}
@@ -858,14 +849,14 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                   ))}
                 </div>
               ) : (
-                <div className="p-4 text-center text-gray-500">
+                <div className="p-4 text-center text-gray-500 dark:text-gray-400">
                   Chưa có lịch sử cập nhật firmware nào.
                 </div>
               )}
             </div>
           )}
           
-          <div className="mt-3 bg-blue-50 p-3 rounded-md text-sm text-blue-800">
+          <div className="mt-3 bg-blue-50 dark:bg-blue-900/30 p-3 rounded-md text-sm text-blue-800 dark:text-blue-200">
             <div className="flex items-center mb-1">
               <HelpCircle size={16} className="mr-1" />
               <span className="font-medium">Hướng dẫn cập nhật firmware:</span>

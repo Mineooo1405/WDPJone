@@ -52,7 +52,7 @@ const MainArea: React.FC<MainAreaProps> = ({
           (containerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
         }
       }}
-      className="relative w-full h-full p-6 bg-gray-100 overflow-auto"
+  className="relative w-full h-full p-6 bg-gray-100 dark:bg-gray-900 overflow-auto"
     >
       {widgets.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-400">
