@@ -743,9 +743,12 @@ class DirectBridge:
         robots_list = []
         for item in ConnectionManager.get_all_robots_with_ip():
             if item.get("connected"):
+                ip = item.get("ip")
+                port = item.get("port")
+                alias_unique = f"{ip}:{port}" if ip and port is not None else ip
                 robots_list.append({
-                    "alias": item.get("ip"),
-                    "ip": item.get("ip"),
+                    "alias": alias_unique,
+                    "ip": ip,
                     "unique_key": item.get("robot_id"),
                     "status": "connected"
                 })
@@ -908,14 +911,23 @@ class DirectBridge:
         robot_port = peername[1]
         unique_robot_key = f"{robot_ip_address}:{robot_port}"
 
-        # Use robot IP as alias/identifier
-        current_alias = robot_ip_address
+        # Use robot IP as alias/identifier; if duplicate IP already mapped, fall back to ip:port to avoid collision
+        desired_alias = robot_ip_address
         async with robot_alias_manager["lock"]:
+            existing_for_ip = robot_alias_manager["alias_to_ip_port"].get(desired_alias)
+            if existing_for_ip and existing_for_ip != unique_robot_key:
+                # Another client already using the plain IP alias; disambiguate with port
+                desired_alias = f"{robot_ip_address}:{robot_port}"
+                log_tcp.warning(f"Alias collision on IP {robot_ip_address}; using unique alias '{desired_alias}' for {unique_robot_key}")
+
+            current_alias = desired_alias
             robot_alias_manager["ip_port_to_alias"][unique_robot_key] = current_alias
             robot_alias_manager["alias_to_ip_port"][current_alias] = unique_robot_key
-            robot_alias_manager["ip_to_alias"][robot_ip_address] = current_alias
+            # Only set ip_to_alias if not already set, to keep a stable primary alias for the IP
+            if robot_ip_address not in robot_alias_manager["ip_to_alias"]:
+                robot_alias_manager["ip_to_alias"][robot_ip_address] = current_alias
             robot_alias_manager["alias_to_ip"][current_alias] = robot_ip_address
-        log_tcp.info(f"Connection from {robot_ip_address}:{robot_port} registered with alias(IP): {current_alias}")
+        log_tcp.info(f"Connection from {robot_ip_address}:{robot_port} registered with alias: {current_alias}")
 
         if not current_alias: # Should not happen if logic above is correct
             logger.error(f"Failed to assign or retrieve alias for {unique_robot_key}. Closing connection.")
@@ -1158,14 +1170,14 @@ class DirectBridge:
                     alias_being_removed = robot_alias_manager["ip_port_to_alias"][unique_robot_key]
                     del robot_alias_manager["ip_port_to_alias"][unique_robot_key]
                     if robot_alias_manager.get("alias_to_ip_port", {}).get(alias_being_removed) == unique_robot_key:
-                         del robot_alias_manager["alias_to_ip_port"][alias_being_removed]
-                    
+                        del robot_alias_manager["alias_to_ip_port"][alias_being_removed]
+                    # Remove alias_to_ip mapping for this alias regardless of whether it's the primary IP alias
+                    if alias_being_removed in robot_alias_manager.get("alias_to_ip", {}):
+                        del robot_alias_manager["alias_to_ip"][alias_being_removed]
+                    # If the primary ip_to_alias points to this alias, clear it
                     if robot_alias_manager.get("ip_to_alias", {}).get(robot_ip_address) == alias_being_removed:
                         if robot_ip_address in robot_alias_manager["ip_to_alias"]:
                             del robot_alias_manager["ip_to_alias"][robot_ip_address]
-                        if alias_being_removed in robot_alias_manager["alias_to_ip"]:
-                            del robot_alias_manager["alias_to_ip"][alias_being_removed]
-                    
                     log_tcp.info(f"Cleaned up alias mappings for {alias_being_removed} ({unique_robot_key})")
                     current_alias = alias_being_removed 
                 else:
