@@ -107,9 +107,9 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
   const currentSelectedIp = getSelectedRobotIp();
 
   const sendWsCommand = useCallback(async (payloadForRobot: RobotCommandPayload): Promise<void> => {
-    if (!currentSelectedIp) {
-      setErrorMessage("Lỗi: IP của robot không hợp lệ. Vui lòng chọn robot.");
-      console.error("sendWsCommand: Target Robot IP is null or invalid (derived from currentSelectedIp).");
+    if (!selectedRobotId) {
+      setErrorMessage("Lỗi: Chưa chọn robot.");
+      console.error("sendWsCommand: Target Robot alias is null or invalid (selectedRobotId).");
       setCommandSending(false);
       return;
     }
@@ -125,23 +125,23 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
 
     const messageToSend = {
       // Map high-level payload types to backend plaintext commands
-      ...(payloadForRobot.type === 'motion' ? { command: 'vector_control', robot_alias: currentSelectedIp, dot_x: payloadForRobot.x, dot_y: payloadForRobot.y, dot_theta: payloadForRobot.theta, stop_time: (payloadForRobot as any).stop_time ?? 0 } : {}),
-      ...(payloadForRobot.type === 'motor_speed' ? { command: 'motor_speed', robot_alias: currentSelectedIp, motor_id: payloadForRobot.motor, speed: payloadForRobot.speed } : {}),
-      ...(payloadForRobot.type === 'emergency_stop' ? { command: 'emergency_stop', robot_alias: currentSelectedIp } : {}),
-      ...(payloadForRobot.type === 'pid_values' ? { command: 'set_pid', robot_alias: currentSelectedIp, motor_id: payloadForRobot.motor, kp: payloadForRobot.kp, ki: payloadForRobot.ki, kd: payloadForRobot.kd } : {}),
+      ...(payloadForRobot.type === 'motion' ? { command: 'vector_control', robot_alias: selectedRobotId, dot_x: payloadForRobot.x, dot_y: payloadForRobot.y, dot_theta: payloadForRobot.theta, stop_time: (payloadForRobot as any).stop_time ?? 0 } : {}),
+      ...(payloadForRobot.type === 'motor_speed' ? { command: 'motor_speed', robot_alias: selectedRobotId, motor_id: payloadForRobot.motor, speed: payloadForRobot.speed } : {}),
+      ...(payloadForRobot.type === 'emergency_stop' ? { command: 'emergency_stop', robot_alias: selectedRobotId } : {}),
+      ...(payloadForRobot.type === 'pid_values' ? { command: 'set_pid', robot_alias: selectedRobotId, motor_id: payloadForRobot.motor, kp: payloadForRobot.kp, ki: payloadForRobot.ki, kd: payloadForRobot.kd } : {}),
     };
     // console.log(`[RobotControlWidget] Sending command:`, messageToSend); // Bỏ comment nếu cần debug
     sendMessage(messageToSend);
-  }, [webSocketIsConnected, sendMessage, currentSelectedIp]);
+  }, [webSocketIsConnected, sendMessage, selectedRobotId]);
   
   const throttledSendCommand = useCallback((payloadForRobot: RobotCommandPayload) => {
-    if (!currentSelectedIp || !webSocketIsConnected) return;
+    if (!selectedRobotId || !webSocketIsConnected) return;
     if (commandThrottleRef.current) clearTimeout(commandThrottleRef.current);
     commandThrottleRef.current = setTimeout(() => {
       sendWsCommand(payloadForRobot);
       commandThrottleRef.current = null;
     }, 100); // 100ms throttle
-  }, [currentSelectedIp, sendWsCommand, webSocketIsConnected]);
+  }, [selectedRobotId, sendWsCommand, webSocketIsConnected]);
 
   const updateVelocities = useCallback((x: number, y: number, theta: number) => {
     const newVelocities = { x: parseFloat(x.toFixed(2)), y: parseFloat(y.toFixed(2)), theta: parseFloat(theta.toFixed(2)) };
@@ -162,14 +162,14 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
   }, [throttledSendCommand, webSocketIsConnected, currentSelectedIp]);
 
   const setMotorSpeed = useCallback((motorId: number, speed: number): void => {
-    if (!currentSelectedIp || !webSocketIsConnected) {
+    if (!selectedRobotId || !webSocketIsConnected) {
       setErrorMessage("Lỗi: Chọn robot và đảm bảo WebSocket kết nối."); return;
     }
     setMotorSpeeds(prevSpeeds => {
       const newSpeeds = [...prevSpeeds]; newSpeeds[motorId - 1] = speed; return newSpeeds;
     });
     throttledSendCommand({ type: "motor_speed", motor: motorId, speed: speed });
-  }, [currentSelectedIp, webSocketIsConnected, throttledSendCommand]);
+  }, [selectedRobotId, webSocketIsConnected, throttledSendCommand]);
 
   // Emergency stop removed per request
 
