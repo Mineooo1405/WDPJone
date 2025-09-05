@@ -1,20 +1,8 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { X, Move } from "lucide-react";
-import { RobotProvider } from "./RobotContext";
-import MainArea from "./MainArea";
-import ConnectionStatusWidget from "./ConnectionStatusWidget";
-import PIDControlWidget from "./PIDControlWidget";
-import TrajectoryWidget from "./TrajectoryWidget"; // Sử dụng phiên bản TS
-import RobotStatusWidget from "./RobotStatusWidget";
-import FirmwareUpdateWidget from "./FirmwareUpdateWidget";
-import IMUWidget from "./IMUWidget"; // Sử dụng phiên bản chính
-import EncoderDataWidget from "./EncoderDataWidget"; // Thêm mới
-import RobotControlWidget from "./RobotControlWidget"; // Thêm widget điều khiển mới
-import LogWidget from './LogWidget';
 import { widgetComponents } from '../App';
 
 interface PlacedWidgetProps {
-  id: string;
   type: string;
   position: { x: number; y: number };
   size: { width: number; height: number };
@@ -26,7 +14,6 @@ interface PlacedWidgetProps {
 }
 
 const PlacedWidget: React.FC<PlacedWidgetProps> = ({
-  id,
   type,
   position,
   size,
@@ -41,7 +28,7 @@ const PlacedWidget: React.FC<PlacedWidgetProps> = ({
   const widgetRef = useRef<HTMLDivElement>(null);
 
   // Xử lý khi widget được click
-  const handleWidgetClick = (e: React.MouseEvent) => {
+  const handleWidgetClick = () => {
     // Chỉ gọi onFocus nếu không đang kéo widget
     if (!isDragging) {
       onFocus();
@@ -64,7 +51,7 @@ const PlacedWidget: React.FC<PlacedWidgetProps> = ({
   };
 
   // Xử lý kéo
-  const handleDrag = (e: MouseEvent) => {
+  const handleDrag = useCallback((e: MouseEvent) => {
     if (isDragging && widgetRef.current) {
       const parentRect = widgetRef.current.parentElement?.getBoundingClientRect();
       if (parentRect) {
@@ -79,7 +66,7 @@ const PlacedWidget: React.FC<PlacedWidgetProps> = ({
         onMove({ x: constrainedX, y: constrainedY });
       }
     }
-  };
+  }, [isDragging, dragOffset.x, dragOffset.y, onMove, size.height, size.width]);
 
   // Xử lý kết thúc kéo
   const handleDragEnd = () => {
@@ -122,7 +109,7 @@ const PlacedWidget: React.FC<PlacedWidgetProps> = ({
       document.removeEventListener("mousemove", handleDrag);
       document.removeEventListener("mouseup", handleDragEnd);
     };
-  }, [isDragging]);
+  }, [isDragging, handleDrag]);
 
   // Render nội dung widget dựa trên loại
   // Thêm type assertion để TypeScript biết rằng type là key hợp lệ

@@ -19,6 +19,10 @@ import RobotControlWidget from './components/RobotControlWidget';
 import TrajectoryWidget from './components/TrajectoryWidget';
 import WidgetDataSimulator from './components/WidgetDataSimulator';
 import SimpleDashboard from './components/SimpleDashboard';
+import RobotSidebar from './components/RobotSidebar';
+import FloatingRobotsButton from './components/FloatingRobotsButton';
+// RobotStatusWidget removed
+import FloatingPinnedRobotButton from './components/FloatingPinnedRobotButton';
 
 // Widget option definition
 interface WidgetOption {
@@ -47,7 +51,7 @@ const widgetComponents: { [key: string]: React.FC<any> } = {
   "encoder-data": EncoderDataWidget,
   "firmware-update": FirmwareUpdateWidget,
   "logs": LogWidget,
-  "connection-status": ConnectionStatusWidget
+  "connection-status": ConnectionStatusWidget,
 };
 
 // Export widgetComponents để các component khác có thể import
@@ -68,9 +72,34 @@ const App: React.FC = () => {
       return 'simple';
     }
   });
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Simple mode: visible widget type ids (persisted)
+  const [simpleVisibleWidgetTypes, setSimpleVisibleWidgetTypes] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('simpleWidgetsVisible');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [
+      'robot-control',
+      'trajectory',
+      'imu',
+      'encoder-data',
+      'pid-control',
+      'firmware-update',
+      'logs',
+      'connection-status',
+      // 'robot-status' // optional in simple mode by default
+    ];
+  });
   
-  // Widget instances that have been placed on the dashboard
+  // Widget instances that have been placed on the dashboard (custom mode)
   const [widgetInstances, setWidgetInstances] = useState<WidgetInstance[]>([]);
+  // Mode-aware active widget types for the sidebar
+  const activeWidgetTypes = useMemo(() => {
+    return layoutMode === 'simple'
+      ? simpleVisibleWidgetTypes
+      : Array.from(new Set(widgetInstances.map(w => w.type)));
+  }, [layoutMode, simpleVisibleWidgetTypes, widgetInstances]);
   
   // Widget options that can be dragged to main area
   const widgetOptions = useMemo(() => [
@@ -162,10 +191,69 @@ const App: React.FC = () => {
     setWidgetInstances(prev => [...prev, newWidget]);
   }, [widgetInstances]);
   
-  // Xử lý xóa widget
-  const handleRemoveWidget = useCallback((widgetId: string) => {
-    setWidgetInstances(prev => prev.filter(widget => widget.id !== widgetId));
+  // Auto-layout grid for custom mode
+  const autoLayoutWidgets = useCallback((instances: WidgetInstance[]): WidgetInstance[] => {
+    const gap = 20;
+    const startX = 20;
+    const startY = 20;
+    const tileW = 420;
+    const tileH = 300;
+    const cols = 3; // fixed grid columns
+    let col = 0;
+    let row = 0;
+    const laidOut = instances.map((w, idx) => {
+      const x = startX + col * (tileW + gap);
+      const y = startY + row * (tileH + gap);
+      const updated: WidgetInstance = {
+        ...w,
+        position: { x, y },
+        size: { width: tileW, height: tileH },
+        zIndex: idx + 1,
+      };
+      col += 1;
+      if (col >= cols) { col = 0; row += 1; }
+      return updated;
+    });
+    return laidOut;
   }, []);
+
+  // Xử lý xóa widget (and auto-compact remaining)
+  const handleRemoveWidget = useCallback((widgetId: string) => {
+    setWidgetInstances(prev => autoLayoutWidgets(prev.filter(widget => widget.id !== widgetId)));
+  }, [autoLayoutWidgets]);
+
+  // Toggle a widget by type: if present, remove all instances; if absent, add one default instance
+  const handleToggleWidgetByType = useCallback((widgetType: string) => {
+    if (layoutMode === 'simple') {
+      setSimpleVisibleWidgetTypes(prev => {
+        const has = prev.includes(widgetType);
+        const next = has ? prev.filter(t => t !== widgetType) : [...prev, widgetType];
+        try { localStorage.setItem('simpleWidgetsVisible', JSON.stringify(next)); } catch {}
+        return next;
+      });
+      return;
+    }
+    // Custom mode: add/remove instances then auto-layout
+    setWidgetInstances(prev => {
+      const exists = prev.some(w => w.type === widgetType);
+      let next = exists ? prev.filter(w => w.type !== widgetType) : (() => {
+        const newId = `${widgetType}-${Date.now()}`;
+        const highestZIndex = prev.reduce((max, w) => Math.max(max, w.zIndex || 0), 0);
+        const newWidget: WidgetInstance = {
+          id: newId,
+          type: widgetType,
+          position: { x: 40, y: 40 },
+          size: { width: 420, height: 300 },
+          config: {},
+          zIndex: highestZIndex + 1,
+        };
+        return [...prev, newWidget];
+      })();
+      // Auto-layout after toggle
+      next = autoLayoutWidgets(next);
+      return next;
+    });
+  }, [layoutMode, autoLayoutWidgets]);
   
   // Cập nhật vị trí widget
   const handleWidgetMove = useCallback((widgetId: string, newPosition: { x: number, y: number }) => {
@@ -227,42 +315,12 @@ const App: React.FC = () => {
 
   // Thêm vào trong App.tsx, bên trong hàm App
   // Thiết lập một số widget mặc định khi ứng dụng khởi động (chỉ ở chế độ Tùy biến)
-  useEffect(() => {
-    if (layoutMode === 'custom' && widgetInstances.length === 0) {
-      setWidgetInstances([
-        {
-          id: `robot-status-${Date.now()}`,
-          type: "robot-status",
-          position: { x: 20, y: 20 },
-          size: { width: 500, height: 600 },
-          zIndex: 1
-        },
-        {
-          id: `robot-control-${Date.now() + 1}`,
-          type: "robot-control",
-          position: { x: 540, y: 20 },
-          size: { width: 400, height: 300 },
-          zIndex: 2
-        },
-        {
-          id: `trajectory-${Date.now() + 2}`,
-          type: "trajectory",
-          position: { x: 540, y: 340 },
-          size: { width: 400, height: 400 },
-          zIndex: 3
-        },
-      ]);
-    }
-  }, [layoutMode]);
+  // Disabled default auto-add in custom mode to avoid unexpected widgets reappearing
 
   // Lưu trạng thái dashboard vào localStorage (chỉ chế độ Tùy biến)
   useEffect(() => {
     if (layoutMode === 'custom') {
-      try {
-        localStorage.setItem('dashboardWidgets', JSON.stringify(widgetInstances));
-      } catch (error) {
-        console.error("Error saving dashboard state:", error);
-      }
+      try { localStorage.setItem('dashboardWidgets', JSON.stringify(widgetInstances)); } catch {}
     }
   }, [widgetInstances, layoutMode]);
 
@@ -273,9 +331,7 @@ const App: React.FC = () => {
       if (layoutMode === 'custom' && savedWidgets) {
         setWidgetInstances(JSON.parse(savedWidgets));
       }
-    } catch (error) {
-      console.error("Error restoring dashboard state:", error);
-    }
+    } catch {}
   }, [layoutMode]);
 
   // Lưu chế độ giao diện
@@ -322,7 +378,7 @@ const App: React.FC = () => {
             {/* Main Content */}
             {layoutMode === 'simple' ? (
               <div className="flex-grow overflow-hidden">
-                <SimpleDashboard />
+                <SimpleDashboard visibleWidgetTypes={simpleVisibleWidgetTypes} />
               </div>
             ) : (
               <div className="flex-grow flex overflow-hidden">
@@ -432,6 +488,18 @@ const App: React.FC = () => {
               </div>
             )}
           </div>  
+          {/* Robot Sidebar Overlay */}
+          <RobotSidebar
+            open={sidebarOpen}
+            onClose={() => setSidebarOpen(false)}
+            widgets={widgetOptions.map(w => ({ id: w.id, name: w.name, icon: w.icon }))}
+            activeWidgetTypes={activeWidgetTypes}
+            onToggleWidget={handleToggleWidgetByType}
+          />
+          {/* Floating Assistive Robot button */}
+          <FloatingRobotsButton onClick={() => setSidebarOpen(prev => !prev)} />
+          {/* Floating Pinned Robot chip */}
+          <FloatingPinnedRobotButton />
         </RobotProvider>
       </DndProvider>
     </GlobalAppProvider>

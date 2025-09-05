@@ -175,9 +175,9 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
 
   // --- START: Keyboard Control Logic (Step per key press) ---
   useEffect(() => {
-    const KBD_SPEED_LINEAR = 0.3; // m/s
-    const KBD_ANGULAR_SPEED = 0.5; // rad/s
-    const STEP_DURATION_MS = 180; // thời gian mỗi bước
+  const KBD_SPEED_LINEAR = 0.3; // m/s
+  const KBD_ANGULAR_SPEED = 0.5; // rad/s
+  const STEP_DURATION_MS = 200; // thời gian mỗi bước
 
     const sendStep = (vx: number, vy: number, omega: number) => {
       // Gửi xung chuyển động ngắn, sau đó tự dừng
@@ -202,13 +202,15 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
         if ((event as any).repeat) return;
         event.preventDefault();
         setKeysPressed(prev => ({ ...prev, [key]: true }));
-        let vx = 0, vy = 0, omg = 0;
-        if (key === 'w') vx = KBD_SPEED_LINEAR * maxSpeed;
-        if (key === 's') vx = -KBD_SPEED_LINEAR * maxSpeed;
-        if (key === 'a') vy = KBD_SPEED_LINEAR * maxSpeed;
-        if (key === 'd') vy = -KBD_SPEED_LINEAR * maxSpeed;
-        if (key === 'q') omg = KBD_ANGULAR_SPEED * maxAngular;
-        if (key === 'e') omg = -KBD_ANGULAR_SPEED * maxAngular;
+  let vx = 0, vy = 0, omg = 0;
+  // Theo kinematics của bridge: +X (vx) là tiến; +Y (vy) là trái.
+  if (key === 'w') vx = KBD_SPEED_LINEAR * maxSpeed;      // Tiến: +X
+  if (key === 's') vx = -KBD_SPEED_LINEAR * maxSpeed;     // Lùi: -X
+  if (key === 'a') vy = KBD_SPEED_LINEAR * maxSpeed;      // Trái: +Y
+  if (key === 'd') vy = -KBD_SPEED_LINEAR * maxSpeed;     // Phải: -Y
+  // Quay: Q trái (CCW, theta+), E phải (CW, theta-)
+  if (key === 'q') omg = KBD_ANGULAR_SPEED * maxAngular;  // Rotate Left: +theta
+  if (key === 'e') omg = -KBD_ANGULAR_SPEED * maxAngular; // Rotate Right: -theta
         sendStep(vx, vy, omg);
       }
     };
@@ -332,10 +334,13 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       kRef.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
 
       if (joyRadius > 0) {
-        normX = dx / joyRadius; // -1 to 1
-        normY = -dy / joyRadius; // -1 to 1 (Y is inverted for typical joystick forward)
+        normX = dx / joyRadius; // -1 .. 1 (right positive)
+        normY = -dy / joyRadius; // -1 .. 1 (up positive)
       }
-      updateVelocities(normX * maxSpeed, normY * maxSpeed, velocities.theta);
+      // Map: vx (forward/back) from vertical; vy (strafe) from horizontal
+  const vx = normY * maxSpeed;     // up -> +vx (forward)
+  const vy = -normX * maxSpeed;    // right -> -vy (strafe right)
+      updateVelocities(vx, vy, velocities.theta);
     };
 
     const handleJoyEnd = () => {
@@ -344,7 +349,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       kRef.style.transition = 'transform 0.2s ease-out';
       kRef.style.transform = 'translate(-50%, -50%)'; // Return to center
       document.body.style.cursor = 'default';
-      updateVelocities(0, 0, velocities.theta); // Stop X, Y movement
+  updateVelocities(0, 0, velocities.theta); // Stop linear movement
     };
 
     const handleRotStart = (clientX: number) => {
@@ -370,8 +375,9 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
         
         // Normalize: (current - min) / (max - min) -> maps to 0-1 range
         // Then scale to -1 to 1
-        const normalizedTheta = ((newLeft - rotKnobWidth / 2) / (rotTrackWidth - rotKnobWidth)) * 2 - 1;
-        updateVelocities(velocities.x, velocities.y, -normalizedTheta * maxAngular); // Invert for intuitive control (right is positive theta)
+  const normalizedTheta = ((newLeft - rotKnobWidth / 2) / (rotTrackWidth - rotKnobWidth)) * 2 - 1;
+  // Quy ước: phải = CW = theta âm; trái = CCW = theta dương (khớp với Q/E ở trên)
+  updateVelocities(velocities.x, velocities.y, -normalizedTheta * maxAngular);
     };
 
     const handleRotEnd = () => {
@@ -456,6 +462,18 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       
       if (message.robot_ip === currentSelectedIp || message.robot_alias === selectedRobotId) {
         switch (message.type) {
+          case 'ack': {
+            const cmd = (message as any).command;
+            if (cmd === 'vector_control' || cmd === 'motor_speed' || cmd === 'set_pid' || cmd === 'emergency_stop') {
+              setCommandSending(false);
+              if (message.status === 'error') {
+                setErrorMessage(message.message || 'Lệnh thất bại.');
+              } else {
+                setErrorMessage('');
+              }
+            }
+            break;
+          }
           case 'encoder_data':
             if (typeof message.rpm_1 === 'number' &&
                 typeof message.rpm_2 === 'number' &&
@@ -547,23 +565,17 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       />
       
     {finalWidgetReady && (
-      <div className="flex-shrink-0 grid grid-cols-3 gap-2 p-2 mb-3 border rounded-md bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-xs">
-             <div className="text-center">
-                 <div className="font-medium text-gray-600">Position (X, Y, θ)</div>
-                 <div className="font-mono">{robotPosition.x.toFixed(2)}, {robotPosition.y.toFixed(2)}, {(robotPosition.theta * 180 / Math.PI).toFixed(1)}°</div>
-             </div>
-             <div className="text-center">
-                  <div className="font-medium text-gray-600">IMU (Head, Pitch, Roll)</div>
-                 <div className="font-mono">{imuData.heading.toFixed(1)}°, {imuData.pitch.toFixed(1)}°, {imuData.roll.toFixed(1)}°</div>
-             </div>
-             <div className="text-center">
-                 <div className="font-medium text-gray-600">Calibration</div>
-                 <span className={`px-2 py-0.5 rounded-full font-mono ${imuData.calibrated ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                     {imuData.calibrated ? 'OK' : 'No'}
-                 </span>
-             </div>
-          </div>
-      )}
+      <div className="flex-shrink-0 grid grid-cols-2 gap-2 p-2 mb-3 border rounded-md bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-xs">
+        <div className="text-center">
+          <div className="font-semibold text-gray-800 dark:text-gray-100">Position (X, Y, θ)</div>
+          <div className="font-mono text-gray-900 dark:text-gray-100">{robotPosition.x.toFixed(2)}, {robotPosition.y.toFixed(2)}, {(robotPosition.theta * 180 / Math.PI).toFixed(1)}°</div>
+        </div>
+        <div className="text-center">
+          <div className="font-semibold text-gray-800 dark:text-gray-100">IMU (Head, Pitch, Roll)</div>
+          <div className="font-mono text-gray-900 dark:text-gray-100">{imuData.heading.toFixed(1)}°, {imuData.pitch.toFixed(1)}°, {imuData.roll.toFixed(1)}°</div>
+        </div>
+      </div>
+    )}
 
       {!compact && (
         <div className="flex-shrink-0 flex justify-between mb-4 border-b border-gray-200 dark:border-gray-700">
@@ -648,9 +660,9 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
                       <RotateCw size={20} className="mx-auto"/> <span className="text-xs font-mono">E</span>
                   </div>
               </div>
-              <div className="text-center mt-4 text-xs text-gray-500">
-                  W/S: Tiến/Lùi, A/D: Xoay Trái/Phải (hoặc Q/E)
-            </div>
+        <div className="text-center mt-4 text-xs text-gray-500">
+          W/S: Tiến/Lùi (X±), A/D: Trái/Phải (Y+/Y−), Q/E: Xoay Trái/Phải (θ+/θ−)
+        </div>
           </div>
           {/* Velocity readouts removed per request */}
         </div>

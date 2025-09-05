@@ -9,45 +9,71 @@ import LogWidget from './LogWidget';
 
 interface SimpleDashboardProps {
   className?: string;
+  visibleWidgetTypes?: string[]; // controls which widgets are rendered
 }
 
 // Bố cục lưới đơn giản, tập trung thao tác chính
 // Hàng 1: Trạng thái (trái lớn) | Điều khiển (phải)
 // Hàng 2: Quỹ đạo (trái) | IMU + Encoder (phải, xếp dọc)
 // Hàng 3: PID (trái) | OTA + Log (phải, xếp dọc)
-const SimpleDashboard: React.FC<SimpleDashboardProps> = ({ className }) => {
+const SimpleDashboard: React.FC<SimpleDashboardProps> = ({ className, visibleWidgetTypes }) => {
+  const show = (id: string) => !visibleWidgetTypes || visibleWidgetTypes.includes(id);
   return (
     <div className={`w-full h-full p-4 overflow-auto ${className || ''}`}>
       <div className="grid grid-cols-12 gap-4 auto-rows-[minmax(220px,auto)]">
         {/* Hàng 1 */}
-        <div className="col-span-4 row-span-2 bg-white dark:bg-gray-800 rounded-lg shadow p-3">
-          <div className="h-full"><RobotControlWidget compact /></div>
-        </div>
+        {show('robot-control') && (
+          <div className="col-span-4 row-span-2 bg-white dark:bg-gray-800 rounded-lg shadow p-3">
+            <div className="h-full"><RobotControlWidget compact /></div>
+          </div>
+        )}
         {/* Hàng 2 */}
-        <div className="col-span-8 row-span-5 bg-white dark:bg-gray-800 rounded-lg shadow p-3">
-          <div className="h-full"><TrajectoryWidget compact /></div>
-        </div>
-        <div className="col-span-4 row-span-5 flex flex-col gap-4">
-          <div className="flex-1 bg-white dark:bg-gray-800 rounded-lg shadow p-3 overflow-hidden">
-            <IMUWidget compact />
+        {show('trajectory') && (
+          <div className="col-span-8 row-span-5 bg-white dark:bg-gray-800 rounded-lg shadow p-3">
+            <div className="h-full"><TrajectoryWidget compact /></div>
           </div>
-          <div className="flex-1 bg-white dark:bg-gray-800 rounded-lg shadow p-3 overflow-hidden">
-            <EncoderDataWidget compact />
+        )}
+        {(show('imu') || show('encoder-data')) && (
+          <div className="col-span-4 row-span-5 flex flex-col gap-4">
+            {show('imu') && (
+              <div className="flex-1 bg-white dark:bg-gray-800 rounded-lg shadow p-3 overflow-hidden">
+                <IMUWidget />
+              </div>
+            )}
+            {show('encoder-data') && (
+              <div className="flex-1 bg-white dark:bg-gray-800 rounded-lg shadow p-3 overflow-hidden">
+                <EncoderDataWidget compact />
+              </div>
+            )}
           </div>
-        </div>
+        )}
 
         {/* Hàng 3 */}
-        <div className="col-span-8 row-span-2 bg-white dark:bg-gray-800 rounded-lg shadow p-3">
-          <PIDControlWidget />
-        </div>
-        <div className="col-span-4 row-span-2 flex flex-col gap-4">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-3">
-            <FirmwareUpdateWidget compact />
+        {show('pid-control') && (
+          <div className="col-span-8 row-span-2 bg-white dark:bg-gray-800 rounded-lg shadow p-3">
+            <PIDControlWidget />
           </div>
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-3">
-            <LogWidget />
-          </div>
-        </div>
+        )}
+        {(show('firmware-update') || show('logs')) && (() => {
+          const showLogs = show('logs');
+          const showFw = show('firmware-update');
+          const single = (showLogs ? 1 : 0) + (showFw ? 1 : 0) === 1;
+          const span = single ? 'col-span-2' : 'col-span-1';
+          return (
+            <div className="col-span-4 row-span-2 grid grid-cols-2 gap-4">
+              {showLogs && (
+                <div className={`${span} bg-white dark:bg-gray-800 rounded-lg shadow p-3`}>
+                  <LogWidget />
+                </div>
+              )}
+              {showFw && (
+                <div className={`${span} bg-white dark:bg-gray-800 rounded-lg shadow p-3`}>
+                  <FirmwareUpdateWidget compact />
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

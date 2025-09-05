@@ -106,9 +106,8 @@ const PIDControlWidget: React.FC = () => {
 
   // Send current PID values to the selected robot
   const sendPIDValuesToRobot = async () => {
-    const targetRobotIp = getSelectedRobotIp();
-    if (!targetRobotIp) {
-      setStatusMessage("IP của robot không có sẵn. Vui lòng chọn robot.");
+    if (!selectedRobotId) {
+      setStatusMessage("Chưa chọn robot.");
       setCommandStatus('error');
       setTimeout(() => setCommandStatus('idle'), 3000);
       return;
@@ -125,7 +124,7 @@ const PIDControlWidget: React.FC = () => {
     
     sendJsonMessage({
       command: "set_pid",
-      robot_alias: targetRobotIp,
+  robot_alias: selectedRobotId,
       motor_id: motorId,
       kp: pidValues.kp,
       ki: pidValues.ki,
@@ -136,9 +135,8 @@ const PIDControlWidget: React.FC = () => {
   
   // Request loading PID config from server file
   const loadPIDFromServer = () => {
-    const targetRobotIp = getSelectedRobotIp();
-    if (!targetRobotIp) {
-      setStatusMessage("IP của robot không có sẵn. Vui lòng chọn robot.");
+    if (!selectedRobotId) {
+      setStatusMessage("Chưa chọn robot.");
       setCommandStatus('error');
       setTimeout(() => setCommandStatus('idle'), 3000);
       return;
@@ -154,7 +152,7 @@ const PIDControlWidget: React.FC = () => {
     setCommandStatus('idle');
     sendJsonMessage({
       command: "load_pid_config",
-      robot_ip: targetRobotIp
+  robot_alias: selectedRobotId
     });
   };
 
@@ -184,9 +182,8 @@ const PIDControlWidget: React.FC = () => {
   };
 
   const triggerPIDTaskOnRobot = async () => {
-    const targetRobotIp = getSelectedRobotIp();
-    if (!targetRobotIp) {
-      setStatusMessage("IP của robot không có sẵn. Vui lòng chọn robot.");
+    if (!selectedRobotId) {
+      setStatusMessage("Chưa chọn robot.");
       setCommandStatus('error');
       setTimeout(() => setCommandStatus('idle'), 3000);
       return;
@@ -203,9 +200,8 @@ const PIDControlWidget: React.FC = () => {
     setCommandStatus('idle'); // Or 'sending' if you have such a state
     
     sendJsonMessage({
-      command: "trigger_robot_pid_task",
-      robot_ip: targetRobotIp,
-      robot_alias: selectedRobotId, // Send alias too for logging/confirmation
+      command: "start_robot",
+      robot_alias: selectedRobotId
     });
     // Confirmation will be handled by lastJsonMessage effect
     // setIsSending will be reset by the effect upon receiving a response

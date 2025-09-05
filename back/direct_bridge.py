@@ -11,8 +11,17 @@ import math
 from dotenv import load_dotenv
 import base64
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file and optional env_config.txt
+load_dotenv()  # .env in current working dir
+try:
+    # Also support env_config.txt located alongside this script
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    env_cfg_path = os.path.join(this_dir, 'env_config.txt')
+    if os.path.exists(env_cfg_path):
+        load_dotenv(env_cfg_path, override=True)
+except Exception:
+    # Non-fatal if unable to load extra env config
+    pass
 
 # --- Configuration from Environment Variables with Fallbacks ---
 TCP_PORT_DEFAULT = 12346

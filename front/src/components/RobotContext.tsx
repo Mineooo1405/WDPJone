@@ -20,6 +20,10 @@ interface RobotContextType {
   lastJsonMessage: any; 
   readyState: ReadyState;
   requestRobotListUpdate: () => void; 
+  pinnedRobotAliases: string[];
+  addPinnedRobot: (alias: string) => void;
+  removePinnedRobot: (alias: string) => void;
+  clearPinnedRobots: () => void;
 }
 
 const RobotContext = createContext<RobotContextType>({
@@ -30,6 +34,10 @@ const RobotContext = createContext<RobotContextType>({
   lastJsonMessage: null,
   readyState: ReadyState.UNINSTANTIATED,
   requestRobotListUpdate: () => {},
+  pinnedRobotAliases: [],
+  addPinnedRobot: () => {},
+  removePinnedRobot: () => {},
+  clearPinnedRobots: () => {},
 });
 
 export const useRobotContext = () => {
@@ -43,6 +51,18 @@ export const useRobotContext = () => {
 export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => {
   const [selectedRobotId, setSelectedRobotIdInternal] = useState<string | null>(null);
   const [connectedRobots, setConnectedRobotsState] = useState<ConnectedRobot[]>([]);
+  const [pinnedRobotAliases, setPinnedRobotAliases] = useState<string[]>(() => {
+    try {
+      const multi = localStorage.getItem('pinnedRobotAliases');
+      if (multi) {
+        const parsed = JSON.parse(multi);
+        return Array.isArray(parsed) ? parsed.filter((v: any) => typeof v === 'string') : [];
+      }
+      const single = localStorage.getItem('pinnedRobotAlias');
+      if (single) return [single];
+    } catch {}
+    return [];
+  });
 
   const {
     sendJsonMessage,
@@ -92,6 +112,8 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
             console.log(`[RobotContext] No robot selected. Auto-selecting: ${newRobots[0].alias}`);
             setSelectedRobotIdInternal(newRobots[0].alias);
           }
+          // Cleanup any pins for robots that are no longer present
+          setPinnedRobotAliases(prev => prev.filter(alias => newRobots.some(r => r.alias === alias)));
         } else {
           if (selectedRobotId !== null) {
             console.log("[RobotContext] Robot list is empty. Clearing selection.");
@@ -117,6 +139,7 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
           if (!selectedRobotId) {
              setSelectedRobotIdInternal(updatedRobotInfo.alias);
           }
+          // If pinned alias was empty, optionally auto-pin first arrival? We won't auto-pin.
         } else if (message.action === 'remove') {
           setConnectedRobotsState(prevRobots => {
             const newRobots = prevRobots.filter(r => r.key !== updatedRobotInfo.key);
@@ -124,6 +147,7 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
               console.log(`[RobotContext] Selected robot ${selectedRobotId} was removed via available_robot_update. Clearing selection.`);
               setSelectedRobotIdInternal(null);
             }
+            setPinnedRobotAliases(prev => prev.filter(a => a !== updatedRobotInfo.alias));
             return newRobots;
           });
         }
@@ -151,6 +175,24 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
     }
   }, [readyState, sendJsonMessage]);
 
+  // Pin management for multiple robots
+  const addPinnedRobot = useCallback((alias: string) => {
+    setPinnedRobotAliases(prev => prev.includes(alias) ? prev : [...prev, alias]);
+  }, []);
+
+  const removePinnedRobot = useCallback((alias: string) => {
+    setPinnedRobotAliases(prev => prev.filter(a => a !== alias));
+  }, []);
+
+  const clearPinnedRobots = useCallback(() => {
+    setPinnedRobotAliases([]);
+  }, []);
+
+  // Persist pins
+  useEffect(() => {
+    try { localStorage.setItem('pinnedRobotAliases', JSON.stringify(pinnedRobotAliases)); } catch {}
+  }, [pinnedRobotAliases]);
+
   return (
     <RobotContext.Provider 
       value={{ 
@@ -160,7 +202,11 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
         sendJsonMessage,
         lastJsonMessage, 
         readyState,
-        requestRobotListUpdate, 
+        requestRobotListUpdate,
+        pinnedRobotAliases,
+        addPinnedRobot,
+        removePinnedRobot,
+        clearPinnedRobots,
       }}
     >
       {children}

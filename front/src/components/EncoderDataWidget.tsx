@@ -230,7 +230,7 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
       // Data can be kept frozen or cleared based on preference
     }
 
-  }, [selectedRobotId, readyState, liveUpdate, sendJsonMessage]); // sendJsonMessage is a dependency for useEffect
+  }, [selectedRobotId, readyState, liveUpdate]);
 
   useEffect(() => {
     const intervalId = setInterval(scheduleUIUpdate, UI_UPDATE_INTERVAL);
@@ -386,7 +386,8 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
         isConnected={liveUpdate}
         error={widgetError}
         onConnect={!liveUpdate ? toggleLiveUpdate : undefined}
-        onDisconnect={liveUpdate ? toggleLiveUpdate : undefined}
+  // Removed onDisconnect to hide the "Ngắt kết nối" button
+  onDisconnect={undefined}
         hideConnectionControls={!(selectedRobotId && readyState === ReadyState.OPEN)}
       />
       
