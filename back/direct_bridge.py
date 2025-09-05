@@ -369,19 +369,25 @@ data_logger = DataLogger()
 class OTAConnection: 
     def __init__(self):
         # For OTA Server functionality
-        self.firmware_to_send_path = None
+        # Support multiple robots: map robot_ip -> prepared firmware path
+        self._firmware_map = {}  # { robot_ip: firmware_path }
         self.ota_server_instance = None # To hold the asyncio.Server object
-        self.ota_server_robot_ip_target = None # Stores target robot IP
         self._ws_broadcast = broadcast_to_all_ui
+
+    def set_prepared_firmware_for_robot(self, target_robot_ip: str, file_path: str):
+        """Register a prepared firmware file for a specific robot IP."""
+        if not target_robot_ip or not os.path.exists(file_path):
+            logger.error(f"Invalid firmware mapping: ip={target_robot_ip}, path={file_path}")
+            return False
+        self._firmware_map[target_robot_ip] = file_path
+        logger.info(f"Prepared firmware for {target_robot_ip}: {file_path}")
+        return True
 
     async def prepare_firmware_for_send(self, file_path, target_robot_ip): # Changed target_robot_id to target_robot_ip
         if not os.path.exists(file_path):
             logger.error(f"Firmware file not found: {file_path}")
             return False
-        self.firmware_to_send_path = file_path
-        self.ota_server_robot_ip_target = target_robot_ip
-        logger.info(f"Firmware {file_path} prepared for robot IP {target_robot_ip}")
-        return True
+        return self.set_prepared_firmware_for_robot(target_robot_ip, file_path)
 
     async def handle_ota_robot_connection(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -392,18 +398,11 @@ class OTAConnection:
         log_ota.info(f"Client connected from {robot_ip_port_str} (listening port {getattr(self, 'ota_port_arg_val', 'UNKNOWN')})")
 
         firmware_was_sent = False
-        current_firmware_path_for_this_connection = None
-
-        # Check if firmware is prepared for this specific IP
-        if self.firmware_to_send_path and self.ota_server_robot_ip_target == robot_actual_ip:
-            log_ota.info(f"Target robot {robot_actual_ip} connected. Firmware {os.path.basename(self.firmware_to_send_path)} is designated.")
-            current_firmware_path_for_this_connection = self.firmware_to_send_path
-            
-            # We will consume/clear these paths AFTER a successful send or a definitive failure for this target.
-        elif not self.firmware_to_send_path:
-            log_ota.warning(f"Client {robot_actual_ip} connected, but no firmware prepared/available.")
-        elif self.ota_server_robot_ip_target != robot_actual_ip:
-            log_ota.warning(f"Client {robot_actual_ip} connected, but firmware is targeted for {self.ota_server_robot_ip_target}. No send.")
+        current_firmware_path_for_this_connection = self._firmware_map.get(robot_actual_ip)
+        if current_firmware_path_for_this_connection:
+            log_ota.info(f"Target robot {robot_actual_ip} connected. Firmware {os.path.basename(current_firmware_path_for_this_connection)} is designated.")
+        else:
+            log_ota.warning(f"Client {robot_actual_ip} connected, but no firmware prepared/available for this IP.")
         
         # Notify UI that a client connected to OTA server
         try:
@@ -483,9 +482,9 @@ class OTAConnection:
                 except Exception:
                     pass
                 
-                # Firmware sent successfully, so consume it (clear path and target for next OTA)
-                self.firmware_to_send_path = None 
-                self.ota_server_robot_ip_target = None
+                # Firmware sent successfully, so consume mapping for this robot
+                if robot_actual_ip in self._firmware_map and self._firmware_map[robot_actual_ip] == current_firmware_path_for_this_connection:
+                    del self._firmware_map[robot_actual_ip]
                 log_ota.info(f"Consumed firmware {os.path.basename(current_firmware_path_for_this_connection)} after sending to {robot_actual_ip}.")
                 
                 # Optionally, delete the temp firmware file if desired
@@ -507,12 +506,9 @@ class OTAConnection:
                     })
                 except Exception:
                     pass
-                # If send failed for the intended target, still consume the firmware
-                # to prevent retries with potentially corrupted state or a bad file.
-                if self.ota_server_robot_ip_target == robot_actual_ip and \
-                   self.firmware_to_send_path == current_firmware_path_for_this_connection: # ensure it was the intended target and path
-                    self.firmware_to_send_path = None
-                    self.ota_server_robot_ip_target = None
+                # If send failed for the intended target, still consume the firmware mapping for safety
+                if robot_actual_ip in self._firmware_map and self._firmware_map[robot_actual_ip] == current_firmware_path_for_this_connection:
+                    del self._firmware_map[robot_actual_ip]
                     log_ota.info(f"Cleared firmware path for {robot_actual_ip} after send error for {current_firmware_path_for_this_connection}.")
             else:
                 log_ota.info(f"No firmware sent to {robot_ip_port_str} (not prepared or wrong target).")
@@ -533,20 +529,19 @@ class OTAConnection:
         if self.ota_server_instance:
             logger.info("OTA server is already running or preparing.")
             return True
-
-        if not self.firmware_to_send_path or not self.ota_server_robot_ip_target:
+        # Legacy method retained; use first prepared mapping if exists
+        if not self._firmware_map:
             logger.error("Cannot start OTA server (once): No firmware prepared or no target robot IP set.")
             return False
-        
         try:
             # This server instance would be temporary if using "start_once" logic.
             # For always-on, the server instance is managed differently.
             temp_server = await asyncio.start_server(
                 self.handle_ota_robot_connection, '0.0.0.0', ota_port
             )
-            logger.info(f"Temporary OTA Server started on 0.0.0.0:{ota_port} for {self.ota_server_robot_ip_target}. It will close after one connection.")
-
-            return True # Placeholder, actual instance management changes.
+            logger.info(f"Temporary OTA Server started on 0.0.0.0:{ota_port}. It will close after one connection.")
+            # Note: temp_server is not stored; this method is legacy and generally unused.
+            return True
         except Exception as e:
             logger.error(f"Failed to start temporary OTA server on port {ota_port}: {e}")
             return False
@@ -573,8 +568,7 @@ class OTAConnection:
             await self.ota_server_instance.wait_closed()
             self.ota_server_instance = None
             logger.info("OTA Server stopped by request.")
-        self.firmware_to_send_path = None
-        self.ota_server_robot_ip_target = None
+        self._firmware_map.clear()
 
 # ==================== FirmwareUploadManager ====================
 class FirmwareUploadManager:
@@ -709,8 +703,10 @@ class DirectBridge:
         except Exception:
             return False
 
-    async def send_upgrade_command_by_alias(self, robot_alias: str) -> bool:
-        """Try multiple upgrade command variants to maximize compatibility with firmware."""
+    async def send_upgrade_command_by_alias(self, robot_alias: str, mode_override: str = None) -> bool:
+        """Try multiple upgrade command variants to maximize compatibility with firmware.
+        mode_override may be one of: 'raw' | 'newline' | 'both' to override env/default.
+        """
         unique_key = await self.get_robot_key_from_alias(robot_alias)
         if not unique_key:
             return False
@@ -719,21 +715,24 @@ class DirectBridge:
             return False
         reader, writer = conn_tuple
         try:
-            # Choose how to send the Upgrade command based on env (default: raw)
+            # Choose how to send the Upgrade command based on override/env (default: raw)
             # BRIDGE_UPGRADE_MODE: 'newline' | 'raw' | 'both'
-            mode = os.environ.get("BRIDGE_UPGRADE_MODE", "raw").lower()
+            mode = (mode_override or os.environ.get("BRIDGE_UPGRADE_MODE", "raw")).lower()
             if mode == "raw":
                 writer.write(b"Upgrade")
                 await writer.drain()
+                log_tcp.info(f"Sent Upgrade (raw) to {robot_alias} ({unique_key})")
             elif mode == "both":
                 writer.write(b"Upgrade")
                 await writer.drain()
                 await asyncio.sleep(0.05)
                 writer.write(b"Upgrade\n")
                 await writer.drain()
+                log_tcp.info(f"Sent Upgrade (raw + newline) to {robot_alias} ({unique_key})")
             else:  # 'newline'
                 writer.write(b"Upgrade\n")
                 await writer.drain()
+                log_tcp.info(f"Sent Upgrade (newline) to {robot_alias} ({unique_key})")
             return True
         except Exception as e:
             log_tcp.error(f"Failed to send Upgrade command to {robot_alias}: {e}")
@@ -1572,9 +1571,8 @@ class DirectBridge:
                             saved_path = self.fw_upload_mgr.finish(target_ip)
                             if not saved_path:
                                 raise RuntimeError("Firmware aggregation failed or size mismatch")
-                            # Prepare OTA server to send to this IP on next OTA connection
-                            self.ota_connection.firmware_to_send_path = saved_path
-                            self.ota_connection.ota_server_robot_ip_target = target_ip
+                            # Prepare OTA server to send to this IP on next OTA connection (multi-robot aware)
+                            self.ota_connection.set_prepared_firmware_for_robot(target_ip, saved_path)
                             await websocket.send(json.dumps({
                                 "type": "firmware_prepared_for_ota",
                                 "robot_ip": target_ip,
@@ -1617,13 +1615,19 @@ class DirectBridge:
                     elif command in ("upgrade", "upgrade_signal"):
                         # Trigger OTA switch on device to connect to OTA server
                         if robot_alias:
-                            ok = await self.send_upgrade_command_by_alias(robot_alias)
-                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                            mode_override = data.get("mode")
+                            ok = await self.send_upgrade_command_by_alias(robot_alias, mode_override)
+                            await websocket.send(json.dumps({
+                                "type":"ack",
+                                "command":command,
+                                "status":"success" if ok else "failed",
+                                "robot_alias": robot_alias
+                            }))
                             await broadcast_to_all_ui({
                                 "type": "firmware_status",
-                                "status": "sent",
+                                "status": "sent" if ok else "failed",
                                 "robot_ip": robot_alias,
-                                "message": "Upgrade command sent (raw + newline)"
+                                "message": (f"Upgrade command sent (mode={(mode_override or os.environ.get('BRIDGE_UPGRADE_MODE', 'raw')).lower()})" if ok else "Upgrade command failed")
                             })
                         else:
                             await websocket.send(json.dumps({"type":"error","command":command,"message":"Missing robot_alias"}))

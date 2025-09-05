@@ -89,6 +89,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
   const [otaType, setOtaType] = useState<'OTA0' | 'OTA1' | null>(compact ? 'OTA1' : null);
   const [otaClientConnected, setOtaClientConnected] = useState(false);
   const [otaServerPort, setOtaServerPort] = useState<number | null>(null);
+  const [upgradeMode, setUpgradeMode] = useState<'raw' | 'newline' | 'both'>('raw');
 
   // State for expected OTA0 IP
   const [expectedOta0Ip, setExpectedOta0Ip] = useState<string>("");
@@ -305,6 +306,17 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
     const unsubOtaStatus = subscribeToMessageType('ota_status', handleActualFirmwareResponse, `${uniqueIdPrefix}-ota_status`); // For robot's OTA/bridge feedback
     const unsubFirmwareProg = subscribeToMessageType('firmware_progress', handleActualFirmwareProgress, `${uniqueIdPrefix}-firmware_progress`);
     const unsubFirmwareVer = subscribeToMessageType('firmware_version', handleActualFirmwareVersion, `${uniqueIdPrefix}-firmware_version`);
+    // Listen for generic acks to surface upgrade status clearly
+    const unsubAck = subscribeToMessageType('ack', (msg: any) => {
+      if (msg && (msg.command === 'upgrade' || msg.command === 'upgrade_signal')) {
+        if (msg.status === 'success') {
+          addLog(`✅ Ack: Upgrade command acknowledged for ${msg.robot_alias || msg.robot_ip || targetRobotForOtaIp}.`);
+        } else {
+          addLog(`❌ Ack: Upgrade command failed for ${msg.robot_alias || msg.robot_ip || targetRobotForOtaIp}.`);
+          setOtaStatus(prev => prev === 'ota1_upgrade_command_sent' ? 'robot_selected_for_ota1' : prev);
+        }
+      }
+    }, `${uniqueIdPrefix}-ack`);
 
     return () => {
       unsubFirmwarePrepared();
@@ -314,8 +326,9 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
       unsubOtaStatus();
       unsubFirmwareProg();
       unsubFirmwareVer();
-    };
-  }, [subscribeToMessageType, handleActualFirmwareResponse, handleActualFirmwareProgress, handleActualFirmwareVersion]);
+      unsubAck();
+  };
+  }, [subscribeToMessageType, handleActualFirmwareResponse, handleActualFirmwareProgress, handleActualFirmwareVersion, addLog, targetRobotForOtaIp]);
   
   useEffect(() => {
     if (webSocketError) {
@@ -491,11 +504,12 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
     }
     
     // setTargetRobotForOtaIp(ipAddress); // Already set by useEffect
-    addLog(`Gửi lệnh "Upgrade" tới robot ${targetRobotForOtaIp}...`);
+    addLog(`Gửi lệnh "Upgrade" tới robot ${targetRobotForOtaIp} (mode=${upgradeMode})...`);
     sendMessage({
       robot_ip: targetRobotForOtaIp, // Send robot_ip
       command: "upgrade_signal", // Command to be sent to the robot
       type: "upgrade_signal", // Type of message
+      mode: upgradeMode,
     });
     setErrorMessage(''); 
     setOtaStatus('ota1_upgrade_command_sent'); 
@@ -526,6 +540,22 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
         </div>
       </h3>
 
+      {/* OTA1: Upgrade mode selector */}
+      {otaType === 'OTA1' && (
+        <div className="mb-3 flex items-center gap-2 text-xs">
+          <span className="text-gray-600 dark:text-gray-300">Chế độ lệnh Upgrade:</span>
+          <select
+            value={upgradeMode}
+            onChange={(e) => setUpgradeMode(e.target.value as 'raw' | 'newline' | 'both')}
+            className="px-2 py-1 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded"
+          >
+            <option value="raw">raw ("Upgrade")</option>
+            <option value="newline">newline ("Upgrade\\n")</option>
+            <option value="both">both (raw + newline)</option>
+          </select>
+        </div>
+      )}
+
       {/* OTA0 Specific: Input for Expected IP */}
       {otaType === 'OTA0' && (
         <div className="mb-4 p-3 bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-700 rounded-md">
@@ -545,7 +575,8 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
             Điền IP của robot OTA0 nếu bạn muốn chuẩn bị firmware trước khi robot hiển thị trong danh sách.
           </p>
         </div>
-      )}
+  )}
+
 
       <div className="flex gap-4 mb-4">
         <div className="flex-1">
@@ -700,9 +731,19 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
           <div className="flex justify-end gap-2 mt-2">
             <button
               onClick={handleCommandRobotToUpgradeForOTA1}
-              disabled={!(otaType === 'OTA1' && targetRobotForOtaIp && webSocketIsConnected && (otaStatus === 'robot_selected_for_ota1' || otaStatus === 'file_selected'))}
+              disabled={!(
+                otaType === 'OTA1' &&
+                targetRobotForOtaIp &&
+                webSocketIsConnected &&
+                (otaStatus === 'robot_selected_for_ota1' || otaStatus === 'file_selected' || otaStatus === 'bridge_ready_for_robot' || otaStatus === 'ota1_upgrade_command_sent')
+              )}
               className={`px-4 py-2 rounded-md flex items-center gap-2 bg-orange-500 text-white hover:bg-orange-600
-                ${!(otaType === 'OTA1' && targetRobotForOtaIp && webSocketIsConnected && (otaStatus === 'robot_selected_for_ota1' || otaStatus === 'file_selected')) ? 'opacity-50 cursor-not-allowed' : ''}
+                ${!(
+                  otaType === 'OTA1' &&
+                  targetRobotForOtaIp &&
+                  webSocketIsConnected &&
+                  (otaStatus === 'robot_selected_for_ota1' || otaStatus === 'file_selected' || otaStatus === 'bridge_ready_for_robot' || otaStatus === 'ota1_upgrade_command_sent')
+                ) ? 'opacity-50 cursor-not-allowed' : ''}
               `}
             >
               <Zap size={16} />
@@ -716,8 +757,8 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                   targetRobotForOtaIp &&
                   selectedFile &&
                   (
-                    (otaType === 'OTA0' && otaStatus === 'file_selected') ||
-                    (otaType === 'OTA1' && (otaStatus === 'file_selected' || otaClientConnected))
+                    (otaType === 'OTA0' && (otaStatus === 'file_selected' || otaStatus === 'bridge_ready_for_robot')) ||
+                    (otaType === 'OTA1' && (otaStatus === 'file_selected' || otaClientConnected || otaStatus === 'bridge_ready_for_robot' || otaStatus === 'ota1_upgrade_command_sent'))
                   )
               )}
         className={`px-4 py-2 rounded-md flex items-center gap-2
@@ -726,7 +767,7 @@ const FirmwareUpdateWidget: React.FC<{ compact?: boolean }> = ({ compact = false
                     webSocketIsConnected &&
                     targetRobotForOtaIp &&
                     selectedFile &&
-                    ((otaType === 'OTA0' && otaStatus === 'file_selected') || (otaType === 'OTA1' && (otaStatus === 'file_selected' || otaClientConnected)))
+                    ((otaType === 'OTA0' && (otaStatus === 'file_selected' || otaStatus === 'bridge_ready_for_robot')) || (otaType === 'OTA1' && (otaStatus === 'file_selected' || otaClientConnected || otaStatus === 'bridge_ready_for_robot' || otaStatus === 'ota1_upgrade_command_sent')))
                    )
           ? 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
                     : 'bg-blue-600 text-white hover:bg-blue-700'

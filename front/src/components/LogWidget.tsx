@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useRobotContext } from './RobotContext';
-import { Download, RotateCcw, Search, Pause, Filter, XCircle, PlayCircle, LogIn, LogOut } from 'lucide-react';
+import { Download, RotateCcw, Search, XCircle } from 'lucide-react';
 import WidgetConnectionHeader from './WidgetConnectionHeader';
 import { ReadyState } from 'react-use-websocket';
 
@@ -37,14 +37,7 @@ const LogWidget: React.FC = () => {
   const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isPaused, setIsPaused] = useState(false);
   const [filterText, setFilterText] = useState('');
-  const [levelFilter, setLevelFilter] = useState<string[]>([]);
-  const [componentFilter, setComponentFilter] = useState<string[]>([]); 
-  const [availableComponents, setAvailableComponents] = useState<string[]>([]);
-  const [showLevelFilter, setShowLevelFilter] = useState(false);
-  const [showComponentFilter, setShowComponentFilter] = useState(false);
-  const [isSubscribed, setIsSubscribed] = useState(false); 
   const [widgetError, setWidgetError] = useState<string | null>(null);
   
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -55,8 +48,9 @@ const LogWidget: React.FC = () => {
     return componentMatch && componentMatch[1] ? componentMatch[1].trim() : '';
   };
 
+  // Auto-consume incoming logs whenever WS is open and a robot is selected
   useEffect(() => {
-    if (readyState === ReadyState.OPEN && lastJsonMessage && selectedRobotId && isSubscribed) {
+    if (readyState === ReadyState.OPEN && lastJsonMessage && selectedRobotId) {
       const message = lastJsonMessage as WebSocketLogPayload;
       if (message.type === 'log' && message.robot_alias === selectedRobotId) {
         const newLogEntry: LogEntry = {
@@ -66,87 +60,35 @@ const LogWidget: React.FC = () => {
           robotAlias: message.robot_alias,
           component: message.component || parseComponentFromMessage(message.message || '')
         };
-        if (!isPaused) {
-            setLogs(prev => [...prev, newLogEntry].slice(-1000));
-            if (newLogEntry.component && !availableComponents.includes(newLogEntry.component)) {
-                setAvailableComponents(prev => [...prev, newLogEntry.component].sort());
-            }
-        }
+        setLogs(prev => [...prev, newLogEntry].slice(-1000));
         setWidgetError(null);
       }
-    } else if (readyState !== ReadyState.OPEN && isSubscribed) {
-      // If WS disconnects while widget thinks it's subscribed, update state
-      // setIsSubscribed(false); // Or show an error/warning
     }
-  }, [lastJsonMessage, readyState, selectedRobotId, isSubscribed, isPaused, availableComponents]);
+  }, [lastJsonMessage, readyState, selectedRobotId]);
 
+  // Auto-scroll to bottom when new logs arrive if user is at bottom
   useEffect(() => {
-    if (isAutoScrollEnabled.current && scrollContainerRef.current && !isPaused) {
+    if (isAutoScrollEnabled.current && scrollContainerRef.current) {
       scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
     }
-  }, [logs, isPaused]);
+  }, [logs]);
 
-  const toggleSubscription = useCallback(() => {
-    if (readyState !== ReadyState.OPEN) {
-      setWidgetError("WebSocket không kết nối.");
-      return;
-    }
-    if (!selectedRobotId) {
-      setWidgetError("Chưa chọn robot (alias).");
-      return;
-    }
-
-    const newSubscribedState = !isSubscribed;
-    setIsSubscribed(newSubscribedState);
-    setWidgetError(null);
-
-    if (newSubscribedState) {
-      console.log(`LogWidget: Subscribing to log for alias ${selectedRobotId}`);
-      sendJsonMessage({
-        command: "subscribe",
-        type: "log",
-        robot_alias: selectedRobotId
-      });
-      setLogs([]);
-    } else {
-      console.log(`LogWidget: Unsubscribing from log for alias ${selectedRobotId}`);
-      sendJsonMessage({
-        command: "unsubscribe",
-        type: "log",
-        robot_alias: selectedRobotId
-      });
-    }
-  }, [isSubscribed, selectedRobotId, sendJsonMessage, readyState]);
-  
+  // Auto-subscribe on mount/alias change/WS open, and cleanup
   useEffect(() => {
     if (selectedRobotId && readyState === ReadyState.OPEN) {
-      if (isSubscribed) {
-        console.log(`LogWidget: Re-subscribing to log for new alias ${selectedRobotId}`);
-        sendJsonMessage({
-          command: "subscribe",
-          type: "log",
-          robot_alias: selectedRobotId
-        });
-        setLogs([]);
-      }
+      console.log(`LogWidget: Auto-subscribing to log for alias ${selectedRobotId}`);
+      sendJsonMessage({ command: 'subscribe', type: 'log', robot_alias: selectedRobotId });
     }
-
     return () => {
-      if (selectedRobotId && readyState === ReadyState.OPEN && isSubscribed) { 
-        console.log(`LogWidget: Unsubscribing from log for alias ${selectedRobotId} on cleanup/change`);
-        sendJsonMessage({
-          command: "unsubscribe",
-          type: "log",
-          robot_alias: selectedRobotId
-        });
+      if (selectedRobotId && readyState === ReadyState.OPEN) {
+        console.log(`LogWidget: Auto-unsubscribe from log for alias ${selectedRobotId}`);
+        sendJsonMessage({ command: 'unsubscribe', type: 'log', robot_alias: selectedRobotId });
       }
     };
-  }, [selectedRobotId, readyState, isSubscribed, sendJsonMessage]);
+  }, [selectedRobotId, readyState, sendJsonMessage]);
 
   const filteredLogs = logs.filter(log => {
     if (filterText && !log.message.toLowerCase().includes(filterText.toLowerCase())) return false;
-    if (levelFilter.length > 0 && !levelFilter.includes(log.level)) return false;
-    if (componentFilter.length > 0 && !componentFilter.includes(log.component)) return false;
     return true;
   });
 
@@ -181,16 +123,6 @@ const LogWidget: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  const togglePause = () => setIsPaused(!isPaused);
-
-  const toggleLevelFilter = (level: string) => {
-    setLevelFilter(prev => prev.includes(level) ? prev.filter(l => l !== level) : [...prev, level]);
-  };
-
-  const toggleComponentFilter = (component: string) => {
-    setComponentFilter(prev => prev.includes(component) ? prev.filter(c => c !== component) : [...prev, component]);
-  };
-
   const formatTimestamp = (timestamp: number) => {
     const ts = timestamp > 2000000000 ? timestamp : timestamp * 1000;
     return new Date(ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 2 });
@@ -207,10 +139,8 @@ const LogWidget: React.FC = () => {
     derivedStatusText = "WS: Disconnected";
   } else if (!selectedRobotId) {
     derivedStatusText = "Chưa chọn robot";
-  } else if (isSubscribed) {
-    derivedStatusText = isPaused ? "Subscribed (Paused)" : "Subscribed - Live Logs";
   } else {
-    derivedStatusText = "Connected (Idle - Not Subscribed)";
+    derivedStatusText = "Subscribed - Live Logs";
   }
 
   return (
@@ -223,19 +153,6 @@ const LogWidget: React.FC = () => {
       />
       
       <div className="flex flex-wrap gap-2 mb-3 mt-3 items-center">
-        {selectedRobotId && readyState === ReadyState.OPEN && (
-          <button
-            onClick={toggleSubscription}
-            className={`px-3 py-2 rounded-md flex items-center gap-1 text-sm font-medium
-                        ${isSubscribed 
-                            ? 'bg-red-600 hover:bg-red-700 text-white' 
-                            : 'bg-green-600 hover:bg-green-700 text-white'}`}
-          >
-            {isSubscribed ? <LogOut size={14} /> : <LogIn size={14} />}
-            <span>{isSubscribed ? 'Stop Logs' : 'Start Logs'}</span>
-          </button>
-        )}
-
         <div className="relative flex-grow min-w-[150px]">
           <input
             type="text"
@@ -246,76 +163,6 @@ const LogWidget: React.FC = () => {
           />
           <Search size={16} className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
         </div>
-        
-        <div className="relative">
-          <button
-            onClick={() => setShowLevelFilter(!showLevelFilter)}
-            className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-md flex items-center gap-1 text-sm"
-          >
-            <Filter size={14} />
-            <span>Level {levelFilter.length > 0 && `(${levelFilter.length})`}</span>
-          </button>
-          
-          {showLevelFilter && (
-            <div className="absolute top-full right-0 mt-1 z-20 bg-gray-700 shadow-lg border border-gray-600 rounded-md p-2 w-48">
-              <div className="flex flex-col gap-1">
-                {['ERROR', 'WARNING', 'INFO', 'DEBUG', 'VERBOSE'].map(level => (
-                  <label key={level} className="flex items-center gap-2 px-2 py-1 hover:bg-gray-600 rounded text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={levelFilter.includes(level)}
-                      onChange={() => toggleLevelFilter(level)}
-                      className="rounded text-blue-500 focus:ring-blue-400 bg-gray-600 border-gray-500"
-                    />
-                    <span className={getLogLevelColor(level).split(' ')[0]}>{level}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-        
-        <div className="relative">
-          <button
-            onClick={() => setShowComponentFilter(!showComponentFilter)}
-            className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-md flex items-center gap-1 text-sm"
-            disabled={availableComponents.length === 0}
-          >
-            <Filter size={14} />
-            <span>Component {componentFilter.length > 0 && `(${componentFilter.length})`}</span>
-          </button>
-          
-          {showComponentFilter && availableComponents.length > 0 && (
-            <div className="absolute top-full right-0 mt-1 z-20 bg-gray-700 shadow-lg border border-gray-600 rounded-md p-2 w-48 max-h-60 overflow-y-auto">
-              <div className="flex flex-col gap-1">
-                {availableComponents.map(comp => (
-                  <label key={comp} className="flex items-center gap-2 px-2 py-1 hover:bg-gray-600 rounded text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={componentFilter.includes(comp)}
-                      onChange={() => toggleComponentFilter(comp)}
-                      className="rounded text-blue-500 focus:ring-blue-400 bg-gray-600 border-gray-500"
-                    />
-                    <span>{comp}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-        
-        <button
-          onClick={togglePause}
-          disabled={!isSubscribed}
-          className={`px-3 py-2 rounded-md flex items-center gap-1 text-sm font-medium 
-            ${ isPaused 
-              ? "bg-green-600 hover:bg-green-700 text-white" 
-              : "bg-yellow-600 hover:bg-yellow-700 text-white"}
-            disabled:opacity-50 disabled:cursor-not-allowed`}
-        >
-          {isPaused ? <PlayCircle size={14} /> : <Pause size={14} />}
-          <span>{isPaused ? 'Resume' : 'Pause'}</span>
-        </button>
         
         <button
           onClick={clearLogs}
@@ -353,13 +200,11 @@ const LogWidget: React.FC = () => {
           isAutoScrollEnabled.current = isAtBottom;
         }}
       >
-        {filteredLogs.length === 0 ? (
+    {filteredLogs.length === 0 ? (
           <div className="h-full flex items-center justify-center text-gray-500">
-            {readyState !== ReadyState.OPEN ? "WebSocket chưa kết nối." :
-             !selectedRobotId ? "Vui lòng chọn một robot." :
-             !isSubscribed ? "Nhấn 'Start Logs' để xem log." :
-             isPaused ? "Log đang tạm dừng. Nhấn Resume để tiếp tục." :
-             "Đang chờ log từ robot..."
+      {readyState !== ReadyState.OPEN ? "WebSocket chưa kết nối." :
+       !selectedRobotId ? "Vui lòng chọn một robot." :
+       "Đang chờ log từ robot..."
             }
           </div>
         ) : (
@@ -384,8 +229,8 @@ const LogWidget: React.FC = () => {
       <div className="mt-2 flex justify-between text-xs text-gray-400">
         <span>Hiển thị {filteredLogs.length} / {logs.length} logs</span>
         <span>
-          {readyState === ReadyState.OPEN ? 'WS: Connected' : 'WS: Disconnected'} -
-          {selectedRobotId ? (isSubscribed ? (isPaused ? ' Paused' : ' Live') : ' Idle') : ' No Robot'}
+      {readyState === ReadyState.OPEN ? 'WS: Connected' : 'WS: Disconnected'} -
+      {selectedRobotId ? ' Live' : ' No Robot'}
         </span>
       </div>
     </div>
