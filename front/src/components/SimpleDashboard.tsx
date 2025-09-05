@@ -54,24 +54,28 @@ const SimpleDashboard: React.FC<SimpleDashboardProps> = ({ className, visibleWid
             <PIDControlWidget />
           </div>
         )}
-        {(show('firmware-update') || show('logs')) && (() => {
+        {/* Logs and Firmware as independent tiles */}
+        {(() => {
           const showLogs = show('logs');
           const showFw = show('firmware-update');
-          const single = (showLogs ? 1 : 0) + (showFw ? 1 : 0) === 1;
-          const span = single ? 'col-span-2' : 'col-span-1';
+          const both = showLogs && showFw;
           return (
-            <div className="col-span-4 row-span-2 grid grid-cols-2 gap-4">
+            <>
               {showLogs && (
-                <div className={`${span} bg-white dark:bg-gray-800 rounded-lg shadow p-3`}>
-                  <LogWidget />
+                <div className={`${both ? 'col-span-6' : 'col-span-4'} row-span-2`}>
+                  <div className="min-w-0 w-full bg-white dark:bg-gray-800 rounded-lg shadow p-3 h-full">
+                    <LogWidget />
+                  </div>
                 </div>
               )}
               {showFw && (
-                <div className={`${span} bg-white dark:bg-gray-800 rounded-lg shadow p-3`}>
-                  <FirmwareUpdateWidget compact />
+                <div className={`${both ? 'col-span-6' : 'col-span-4'} row-span-2`}>
+                  <div className="min-w-0 w-full bg-white dark:bg-gray-800 rounded-lg shadow p-3 h-full">
+                    <FirmwareUpdateWidget compact />
+                  </div>
                 </div>
               )}
-            </div>
+            </>
           );
         })()}
       </div>
