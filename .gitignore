@@ -20,3 +20,5 @@ OTA1_Omni/
 OTA0_FirmwareUpdate/
 Omni_Server/
 _pycache_/
+
+*.txt
