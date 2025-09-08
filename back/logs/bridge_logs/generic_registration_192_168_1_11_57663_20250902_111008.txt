@@ -1,1 +1,0 @@
-1756786248.885 {"robot_ip": "192.168.1.11", "robot_alias": "192.168.1.11", "timestamp": 1756786248.885228, "type": "generic_registration", "data": {"type": "registration", "robot_id": "robot1"}}

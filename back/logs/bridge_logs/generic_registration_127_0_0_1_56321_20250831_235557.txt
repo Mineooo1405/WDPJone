@@ -1,1 +1,0 @@
-1756659393.100 {"robot_ip": "127.0.0.1", "robot_alias": "127.0.0.1", "timestamp": 1756659393.1002564, "type": "generic_registration", "data": {"type": "registration", "robot_id": "robot-sim", "timestamp": 1756659393.1002564}}

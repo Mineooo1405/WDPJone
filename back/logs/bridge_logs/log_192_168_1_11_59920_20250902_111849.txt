@@ -1,5 +1,0 @@
-Time Message
-1756787572.930 W (2319) Motor: Setup Motor Done
-1756787572.932 W (2329) Position_Handler: Robot position reset to (1.800, 1.200, 0.000)
-1756787600.988 W (30389) Socket: Received: Upgrade
-1756787600.989 W (30389) Socket: ----Switch to Upgrade----

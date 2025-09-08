@@ -3,3 +3,7 @@ pandas
 python-dotenv
 websockets 
 aiohttp
+Pillow
+SQLAlchemy>=2.0.0
+fastapi
+uvicorn[standard]

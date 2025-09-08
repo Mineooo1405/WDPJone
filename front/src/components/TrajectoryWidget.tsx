@@ -41,9 +41,16 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
   const [robotPaths, setRobotPaths] = useState<Record<string, TrajectoryPoint[]>>({});
   const [robotPoses, setRobotPoses] = useState<Record<string, RobotPose | null>>({});
   const robotPosesRef = useRef<Record<string, RobotPose | null>>({}); // For plugin access
+  // Track robot types per alias for custom icon rendering (omni vs mecanum)
+  const robotTypesRef = useRef<Record<string, 'omni' | 'mecanum'>>({});
   const subscribedAliasesRef = useRef<Set<string>>(new Set());
   const colorMapRef = useRef<Record<string, string>>({});
   const [widgetError, setWidgetError] = useState<string | null>(null);
+  // Map and navigation state
+  const [mapImageUrl, setMapImageUrl] = useState<string | null>(null);
+  const [mapMeta, setMapMeta] = useState<{ width: number; height: number; resolution: number; origin_x: number; origin_y: number } | null>(null);
+  const [plannedPaths, setPlannedPaths] = useState<Record<string, { x: number; y: number }[]>>({});
+  const [navStatus, setNavStatus] = useState<Record<string, string>>({});
 
   // Color palette for different robots
   const palette = React.useMemo(() => [
@@ -97,82 +104,55 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     return { dash, pointStyle } as { dash: number[]; pointStyle: any };
   }, []);
 
-  // Effect to handle WebSocket messages for real-time trajectory updates (multi-robot)
+  // Effect to handle WebSocket messages for real-time trajectory updates (position-only, multi-robot) and navigation/map
   useEffect(() => {
     if (lastJsonMessage) {
       try {
         const message = lastJsonMessage as any;
-        // Check for the 'realtime_trajectory' message type from the backend
-        if (message.type === 'realtime_trajectory' && message.robot_alias) {
+        // Use only position_update from backend (authoritative pose from firmware)
+        if (message.type === 'position_update' && message.robot_alias) {
           const alias = message.robot_alias as string;
-          // console.log(`[TrajectoryWidget] Received realtime_trajectory for ${alias}:`, message);
-          const { position, path } = message;
-
-          if (position && typeof position.x === 'number' && typeof position.y === 'number' && (typeof position.theta === 'number' || typeof position.theta === 'undefined') && Array.isArray(path)) {
+          const position = message.position || message.data; // tolerate either shape
+          if (position && typeof position.x === 'number' && typeof position.y === 'number') {
             const newPose: RobotPose = {
               x: position.x,
               y: position.y,
-              theta: typeof position.theta === 'number' ? position.theta : 0, // Default theta if undefined
+              theta: typeof position.theta === 'number' ? position.theta : 0,
             };
             setRobotPoses(prev => {
               const next = { ...prev, [alias]: newPose };
               robotPosesRef.current = next;
               return next;
             });
-            // console.log("[TrajectoryWidget] Updated currentPose:", newPose); // Log new pose
 
-            const newPathPoints: TrajectoryPoint[] = path
-              .filter(p => p && typeof p.x === 'number' && typeof p.y === 'number') // Filter out invalid points
-              .map((p: any) => ({ x: p.x, y: p.y })) // Ensure points have x and y
-              .slice(-MAX_PATH_POINTS_DISPLAY);
-            
-            setRobotPaths(prev => ({ ...prev, [alias]: newPathPoints }));
-            // Log only the first point or length to avoid flooding console with large paths
-            // console.log("[TrajectoryWidget] Updated currentPath (length " + newPathPoints.length + "):", newPathPoints.length > 0 ? newPathPoints[0] : 'empty', newPathPoints);
-
-
-            if (widgetError) setWidgetError(null); // Clear any previous error
+            // Append to path (position-only history)
+            setRobotPaths(prev => {
+              const prevPath = prev[alias] || [];
+              const last = prevPath[prevPath.length - 1];
+              // Avoid duplicate consecutive points
+              const shouldAppend = !last || last.x !== newPose.x || last.y !== newPose.y || last.theta !== newPose.theta;
+              const nextPath = shouldAppend ? [...prevPath, { x: newPose.x, y: newPose.y, theta: newPose.theta }] : prevPath;
+              // Cap length
+              const capped = nextPath.length > MAX_PATH_POINTS_DISPLAY ? nextPath.slice(-MAX_PATH_POINTS_DISPLAY) : nextPath;
+              return { ...prev, [alias]: capped };
+            });
+            if (widgetError) setWidgetError(null);
           } else {
-            console.warn("[TrajectoryWidget] Received malformed realtime_trajectory data. Position:", position, "Path:", path, "Message:", message);
-            // Optionally, set an error state for the user, but be mindful of spamming if messages are frequent
-            // setWidgetError("Malformed trajectory data received."); 
+            console.warn('[TrajectoryWidget] Malformed position_update:', message);
           }
-        } else if (message.type === 'trajectory_data' && message.robot_alias) {
+        } else if (message.type === 'planned_path' && message.robot_alias) {
           const alias = message.robot_alias as string;
-          // Handle older 'trajectory_data' format if still in use, with similar logging
-          // console.log(`[TrajectoryWidget] Received (old) trajectory_data for ${alias}:`, message);
-          const { trajectory } = message; 
-          if (Array.isArray(trajectory)) {
-              const newPath: TrajectoryPoint[] = trajectory
-                  .filter(p => p && typeof p.x === 'number' && typeof p.y === 'number')
-                  .map((p: any) => ({ x: p.x, y: p.y }))
-                  .slice(-MAX_PATH_POINTS_DISPLAY);
-              setRobotPaths(prev => ({ ...prev, [alias]: newPath }));
-              // console.log("[TrajectoryWidget] Updated currentPath from trajectory_data (length " + newPath.length + "):", newPath.length > 0 ? newPath[0] : 'empty', newPath);
-
-              if (trajectory.length > 0) {
-                  const lastPoint = trajectory[trajectory.length - 1];
-                  if (lastPoint && typeof lastPoint.x === 'number' && typeof lastPoint.y === 'number') {
-                      const newPose: RobotPose = {
-                          x: lastPoint.x,
-                          y: lastPoint.y,
-                          theta: typeof lastPoint.theta === 'number' ? lastPoint.theta : 0,
-                      };
-                      setRobotPoses(prev => {
-                        const next = { ...prev, [alias]: newPose };
-                        robotPosesRef.current = next;
-                        return next;
-                      });
-                      // console.log("[TrajectoryWidget] Updated currentPose from trajectory_data:", newPose);
-                  }
-              }
-              if (widgetError) setWidgetError(null);
-          } else {
-              console.warn("[TrajectoryWidget] Received malformed trajectory_data. Trajectory:", trajectory, "Message:", message);
+          const points = Array.isArray(message.points) ? message.points.filter((p: any) => typeof p.x === 'number' && typeof p.y === 'number') : [];
+          setPlannedPaths(prev => ({ ...prev, [alias]: points }));
+        } else if (message.type === 'navigation_status' && message.robot_alias) {
+          const alias = message.robot_alias as string;
+          if (typeof message.status === 'string') setNavStatus(prev => ({ ...prev, [alias]: message.status }));
+        } else if (message.type === 'map_loaded') {
+          const { width, height, resolution, origin_x, origin_y } = message;
+          if (typeof width === 'number' && typeof height === 'number' && typeof resolution === 'number') {
+            setMapMeta({ width, height, resolution, origin_x: origin_x ?? 0, origin_y: origin_y ?? 0 });
+            // Keep existing imageUrl; UI triggers upload and stores preview already
           }
-        } else if (message.robot_alias) {
-          // Log if message is for the selected robot but not a recognized trajectory type
-          // console.log(`[TrajectoryWidget] Received message of type '${message.type}' for ${selectedRobotId}, not a trajectory type.`);
         }
       } catch (error) {
         console.error("Error processing trajectory message:", error);
@@ -181,7 +161,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     }
   }, [lastJsonMessage, widgetError]);
 
-  // Effect for subscribing to all connected robots and unsubscribing when they disappear
+  // Effect for subscribing to all connected robots (position_update + navigation topics) and unsubscribing when they disappear
   useEffect(() => {
     if (readyState !== ReadyState.OPEN) return;
     const currentSubs = subscribedAliasesRef.current;
@@ -190,7 +170,9 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     // Unsubscribe removed
     currentSubs.forEach(alias => {
       if (!targetAliases.has(alias)) {
-        sendJsonMessage({ command: 'unsubscribe', type: 'realtime_trajectory', robot_alias: alias });
+        sendJsonMessage({ command: 'unsubscribe', type: 'position_update', robot_alias: alias });
+        sendJsonMessage({ command: 'unsubscribe', type: 'planned_path', robot_alias: alias });
+        sendJsonMessage({ command: 'unsubscribe', type: 'navigation_status', robot_alias: alias });
         currentSubs.delete(alias);
         setRobotPaths(prev => { const n = { ...prev }; delete n[alias]; return n; });
         setRobotPoses(prev => { const n = { ...prev }; delete n[alias]; robotPosesRef.current = n; return n; });
@@ -200,7 +182,9 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     // Subscribe new
     targetAliases.forEach(alias => {
       if (!currentSubs.has(alias)) {
-        sendJsonMessage({ command: 'subscribe', type: 'realtime_trajectory', robot_alias: alias });
+        sendJsonMessage({ command: 'subscribe', type: 'position_update', robot_alias: alias });
+        sendJsonMessage({ command: 'subscribe', type: 'planned_path', robot_alias: alias });
+        sendJsonMessage({ command: 'subscribe', type: 'navigation_status', robot_alias: alias });
         currentSubs.add(alias);
       }
     });
@@ -208,7 +192,9 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     // Cleanup on unmount: unsubscribe all
     return () => {
       currentSubs.forEach(alias => {
-        sendJsonMessage({ command: 'unsubscribe', type: 'realtime_trajectory', robot_alias: alias });
+        sendJsonMessage({ command: 'unsubscribe', type: 'position_update', robot_alias: alias });
+        sendJsonMessage({ command: 'unsubscribe', type: 'planned_path', robot_alias: alias });
+        sendJsonMessage({ command: 'unsubscribe', type: 'navigation_status', robot_alias: alias });
       });
       currentSubs.clear();
     };
@@ -219,7 +205,9 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     if (!canvasRef.current) return;
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
-    // Plugin to draw a 3-wheel omni robot: body + 3 wheels + heading mark
+    // Plugin to draw robot icons:
+    // - Omni: circular body + 3 wheels at 120°
+    // - Mecanum: circular body + 4 mecanum wheels with 45° rollers
   const robotIconPlugin: any = {
       id: 'robotIconPlugin',
       afterDatasetsDraw: (chart: any) => {
@@ -229,7 +217,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
         if (!xScale || !yScale) return;
         const ctx2 = chart.ctx as CanvasRenderingContext2D;
         const wheelAngles = [0, (2*Math.PI)/3, (4*Math.PI)/3];
-        const drawRobot = (pose: RobotPose, color: string) => {
+        const drawOmni = (pose: RobotPose, color: string) => {
           const cx = xScale.getPixelForValue(pose.x);
           const cy = yScale.getPixelForValue(pose.y);
           const bodyR = 10;
@@ -283,10 +271,84 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
           ctx2.fill();
           ctx2.restore();
         };
+        const drawMecanum = (pose: RobotPose, color: string) => {
+          const cx = xScale.getPixelForValue(pose.x);
+          const cy = yScale.getPixelForValue(pose.y);
+          const bodyR = 10;
+          const wheelR = bodyR + 7;
+          const wheelLen = 14;
+          const wheelThk = 4;
+          const arrowLen = 14;
+          const arrowBase = 8;
+          ctx2.save();
+          ctx2.translate(cx, cy);
+          ctx2.rotate(-(pose.theta || 0));
+          // Body
+          ctx2.beginPath();
+          ctx2.arc(0, 0, bodyR, 0, Math.PI * 2);
+          ctx2.fillStyle = `${color}33`;
+          ctx2.fill();
+          ctx2.lineWidth = 2;
+          ctx2.strokeStyle = color;
+          ctx2.stroke();
+          // Four mecanum wheels at N/E/S/W with ±45° roller orientation
+          const wheels = [
+            { x: wheelR,  y: 0,        ang: Math.PI/4 },   // right
+            { x: -wheelR, y: 0,        ang: -Math.PI/4 },  // left
+            { x: 0,       y: -wheelR,  ang: -Math.PI/4 },  // top
+            { x: 0,       y: wheelR,   ang: Math.PI/4 },   // bottom
+          ];
+          for (const wpos of wheels) {
+            ctx2.save(); ctx2.translate(wpos.x, wpos.y); ctx2.rotate(wpos.ang);
+            const w = wheelLen, h = wheelThk, rx = -w/2, ry = -h/2, r = Math.min(2, h/2);
+            // Base wheel rectangle
+            ctx2.beginPath();
+            ctx2.moveTo(rx + r, ry);
+            ctx2.lineTo(rx + w - r, ry);
+            ctx2.quadraticCurveTo(rx + w, ry, rx + w, ry + r);
+            ctx2.lineTo(rx + w, ry + h - r);
+            ctx2.quadraticCurveTo(rx + w, ry + h, rx + w - r, ry + h);
+            ctx2.lineTo(rx + r, ry + h);
+            ctx2.quadraticCurveTo(rx, ry + h, rx, ry + h - r);
+            ctx2.lineTo(rx, ry + r);
+            ctx2.quadraticCurveTo(rx, ry, rx + r, ry);
+            ctx2.closePath();
+            ctx2.fillStyle = 'rgba(210, 210, 210, 0.95)';
+            ctx2.fill();
+            ctx2.lineWidth = 1.5;
+            ctx2.strokeStyle = 'rgba(70, 70, 70, 0.95)';
+            ctx2.stroke();
+            // Diagonal rollers hint lines
+            ctx2.save();
+            ctx2.strokeStyle = 'rgba(70,70,70,0.9)';
+            ctx2.lineWidth = 1;
+            const lines = 3; // small diagonal grooves
+            for (let i = 0; i < lines; i++) {
+              const t = (i + 1) / (lines + 1);
+              const lx = rx + t * w;
+              ctx2.beginPath();
+              ctx2.moveTo(lx - 3, ry);
+              ctx2.lineTo(lx + 3, ry + h);
+              ctx2.stroke();
+            }
+            ctx2.restore();
+            ctx2.restore();
+          }
+          // Heading
+          ctx2.beginPath();
+          ctx2.moveTo(arrowLen, 0);
+          ctx2.lineTo(-arrowLen * 0.35, arrowBase / 2);
+          ctx2.lineTo(-arrowLen * 0.35, -arrowBase / 2);
+          ctx2.closePath();
+          ctx2.fillStyle = color;
+          ctx2.fill();
+          ctx2.restore();
+        };
         Object.entries(posesMap).forEach(([alias, pose]) => {
           if (!pose) return;
           const color = getColorForAlias(alias);
-          drawRobot(pose, color);
+          const rtype = robotTypesRef.current[alias] || 'omni';
+          if (rtype === 'mecanum') drawMecanum(pose, color); else drawOmni(pose, color);
         });
       }
     };
@@ -302,6 +364,32 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
         ctx.fillStyle = '#0b1220'; // deep navy for higher contrast
         ctx.fillRect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, chartArea.bottom - chartArea.top);
         ctx.restore();
+      }
+    };
+
+    // Map overlay plugin draws uploaded map aligned with world coordinates
+    const mapOverlayPlugin: any = {
+      id: 'mapOverlayPlugin',
+      beforeDatasetsDraw: (chart: any) => {
+        if (!mapImageUrl || !mapMeta) return;
+        const img = new Image();
+        img.src = mapImageUrl;
+        const xScale = chart.scales['x'];
+        const yScale = chart.scales['y'];
+        if (!xScale || !yScale) return;
+        // Compute pixel bounds for world-aligned image
+        const x0 = xScale.getPixelForValue(mapMeta.origin_x);
+        const x1 = xScale.getPixelForValue(mapMeta.origin_x + mapMeta.width * mapMeta.resolution);
+        const yTop = yScale.getPixelForValue(mapMeta.origin_y + mapMeta.height * mapMeta.resolution);
+        const yBot = yScale.getPixelForValue(mapMeta.origin_y);
+        const wpx = x1 - x0;
+        const hpx = yBot - yTop;
+        try {
+          chart.ctx.save();
+          chart.ctx.globalAlpha = 0.6;
+          chart.ctx.drawImage(img, x0, yTop, wpx, hpx);
+          chart.ctx.restore();
+        } catch {}
       }
     };
 
@@ -345,24 +433,42 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
         },
         aspectRatio: 1,
       },
-  plugins: [robotIconPlugin, chartBgPlugin],
+  plugins: [robotIconPlugin, chartBgPlugin, mapOverlayPlugin],
     });
     return () => {
       chartRef.current?.destroy();
       chartRef.current = null;
     };
-  }, [getColorForAlias]);
+  }, [getColorForAlias, mapImageUrl, mapMeta]);
 
   // Update chart datasets when paths change (multi-robot)
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
     const aliases = Object.keys(robotPaths);
-    // Rebuild datasets to match aliases
-    chart.data.datasets = aliases.map((alias) => {
+    const datasets: any[] = [];
+    // Planned paths first (thin, dashed)
+    Object.keys(plannedPaths).forEach(alias => {
+      const pathPts = plannedPaths[alias] || [];
+      if (pathPts.length === 0) return;
+      const color = getColorForAlias(alias);
+      datasets.push({
+        label: `${alias} planned`,
+        data: pathPts as any,
+        borderColor: color,
+        pointBackgroundColor: color,
+        borderDash: [6, 4],
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: false,
+        tension: 0,
+      });
+    });
+    // Actual paths
+    aliases.forEach((alias) => {
       const color = getColorForAlias(alias);
       const { dash, pointStyle } = getStyleForAlias(alias);
-      return {
+      datasets.push({
         label: alias,
         data: (robotPaths[alias] || []) as any,
         borderColor: color,
@@ -373,17 +479,62 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
         pointStyle,
         pointRadius: selectedRobotId === alias ? 3 : 2,
         tension: 0.1,
-      };
+      });
     });
+    chart.data.datasets = datasets;
     chart.update('none');
-  }, [robotPaths, selectedRobotId, getColorForAlias, getStyleForAlias]);
+  }, [robotPaths, plannedPaths, selectedRobotId, getColorForAlias, getStyleForAlias]);
 
   // Repaint icons when poses change
   useEffect(() => {
     chartRef.current?.update('none');
   }, [robotPoses]);
 
+  // Keep robot types in a ref for the icon plugin. Trigger repaint when the list changes.
+  useEffect(() => {
+    const map: Record<string, 'omni' | 'mecanum'> = {};
+    (connectedRobots || []).forEach(r => {
+      map[r.alias] = (r.robot_type === 'mecanum' ? 'mecanum' : 'omni');
+    });
+    robotTypesRef.current = map;
+    // Repaint to reflect icon changes
+    chartRef.current?.update('none');
+  }, [connectedRobots]);
+
   const resetZoom = () => chartRef.current?.resetZoom();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [mapConfig, setMapConfig] = useState({ resolution: 0.02, origin_x: 0, origin_y: 0, threshold: 127 });
+  const onUploadMapClick = () => fileInputRef.current?.click();
+  const onMapFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      setMapImageUrl(result);
+      const base64 = result.split(',')[1] || '';
+      if (readyState === WebSocket.OPEN) {
+        sendJsonMessage({ command: 'upload_map', data: base64, ...mapConfig });
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+  const handleCanvasClick = (evt: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!selectedRobotId || firmwareUpdateMode) return;
+    const chart = chartRef.current as any;
+    if (!chart) return;
+    const rect = chart.canvas.getBoundingClientRect();
+    const px = evt.clientX - rect.left;
+    const py = evt.clientY - rect.top;
+    const xs = chart.scales['x'];
+    const ys = chart.scales['y'];
+    if (!xs || !ys) return;
+    const xVal = xs.getValueForPixel(px);
+    const yVal = ys.getValueForPixel(py);
+    if (readyState === WebSocket.OPEN) {
+      sendJsonMessage({ command: 'navigate_to', robot_alias: selectedRobotId, x: xVal, y: yVal, speed: 0.2 });
+    }
+  };
   const clearPath = () => {
     if (selectedRobotId && readyState === WebSocket.OPEN) {
       // Send a command to the backend to clear its trajectory history
@@ -419,7 +570,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
   return (
   <div className={`flex flex-col h-full ${compact ? 'p-2' : 'p-3'} bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-200 rounded-lg shadow-xl`}>
       <WidgetConnectionHeader
-  title={`Real-time Trajectory (Multi)`}
+  title={`Real-time Trajectory (Position-only)`}
         statusTextOverride={derivedStatusText}
         isConnected={readyState === WebSocket.OPEN && !!selectedRobotId && !firmwareUpdateMode}
         error={widgetError}
@@ -452,6 +603,29 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
 
         {/* Utility controls */}
         <div className="flex items-center gap-2 ml-auto">
+          {/* Map controls */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onUploadMapClick}
+              className="px-3 py-1.5 bg-emerald-600 text-white rounded-md flex items-center gap-1 hover:bg-emerald-700 disabled:opacity-50 text-xs"
+              disabled={firmwareUpdateMode}
+              title="Upload occupancy map image"
+            >
+              Upload Map
+            </button>
+            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={onMapFileSelected} />
+            <div className="flex items-center gap-1 text-xs text-gray-600 dark:text-gray-300">
+              <label>res:</label>
+              <input type="number" step="0.001" className="w-16 px-1 py-0.5 rounded border dark:bg-gray-700"
+                value={mapConfig.resolution} onChange={e => setMapConfig(cfg => ({ ...cfg, resolution: parseFloat(e.target.value) }))} />
+              <label>ox:</label>
+              <input type="number" step="0.01" className="w-16 px-1 py-0.5 rounded border dark:bg-gray-700"
+                value={mapConfig.origin_x} onChange={e => setMapConfig(cfg => ({ ...cfg, origin_x: parseFloat(e.target.value) }))} />
+              <label>oy:</label>
+              <input type="number" step="0.01" className="w-16 px-1 py-0.5 rounded border dark:bg-gray-700"
+                value={mapConfig.origin_y} onChange={e => setMapConfig(cfg => ({ ...cfg, origin_y: parseFloat(e.target.value) }))} />
+            </div>
+          </div>
           <button
             onClick={resetZoom}
             className="px-3 py-1.5 bg-blue-600 text-white rounded-md flex items-center gap-1 hover:bg-blue-700 disabled:opacity-50 text-xs"
@@ -491,6 +665,11 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
           <span className="block sm:inline">{widgetError}</span>
         </div>
       )}
+      {selectedRobotId && navStatus[selectedRobotId] && (
+        <div className="bg-amber-100 border border-amber-300 text-amber-700 px-3 py-1 rounded mb-2 text-xs">
+          Navigation: {navStatus[selectedRobotId]}
+        </div>
+      )}
 
       <div className={`flex-grow relative w-full ${compact ? 'h-56 min-h-[220px]' : 'h-64 md:h-auto min-h-[300px]'}`}>
         {firmwareUpdateMode ? (
@@ -498,7 +677,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
             <p className="text-lg font-semibold">Trajectory view disabled during Firmware Update.</p>
           </div>
         ) : (
-          <canvas ref={canvasRef}></canvas>
+          <canvas ref={canvasRef} onClick={handleCanvasClick}></canvas>
         )}
       </div>
     </div>

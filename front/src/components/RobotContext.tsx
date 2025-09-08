@@ -10,6 +10,7 @@ export interface ConnectedRobot {
   ip: string;
   key: string; // unique_key (ip:port) from backend
   status?: string; // Optional status like "connected"
+  robot_type?: 'omni' | 'mecanum';
 }
 
 interface RobotContextType {
@@ -76,15 +77,12 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
       console.log('RobotContext: WebSocket Opened, requesting robot list.');
       sendJsonMessage({ command: 'get_available_robots' });
     },
+    // Avoid wiping UI state on transient disconnects; keep selection and known robots
     onClose: () => {
-      console.log('RobotContext: WebSocket Closed.');
-      setConnectedRobotsState([]);
-      setSelectedRobotIdInternal(null);
+      console.log('RobotContext: WebSocket Closed (transient). Will attempt reconnect.');
     },
     onError: (event: Event) => {
       console.error('RobotContext: WebSocket Error:', event);
-      setConnectedRobotsState([]);
-      setSelectedRobotIdInternal(null);
     }
   });
 
@@ -98,7 +96,8 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
           alias: r.alias || r.ip, // backend now uses IP as alias
           ip: r.ip || r.alias,
           key: r.key || r.unique_key || r.robot_id,
-          status: r.status
+          status: r.status,
+          robot_type: r.robot_type as any,
         })) : [];
 
         setConnectedRobotsState(newRobots);
@@ -122,11 +121,12 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
         }
       } else if (message.type === 'available_robot_update' && message.robot) {
         console.log('RobotContext: Received available_robot_update from backend', message);
-        const updatedRobotInfo: ConnectedRobot = {
+    const updatedRobotInfo: ConnectedRobot = {
             alias: message.robot.alias,
             ip: message.robot.ip,
             key: message.robot.unique_key,
-            status: message.robot.status
+      status: message.robot.status,
+      robot_type: message.robot.robot_type as any,
         };
 
         if (message.action === 'add') {
@@ -134,7 +134,7 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
             if (!prevRobots.find(r => r.key === updatedRobotInfo.key)) {
               return [...prevRobots, updatedRobotInfo];
             }
-            return prevRobots.map(r => r.key === updatedRobotInfo.key ? updatedRobotInfo : r);
+            return prevRobots.map(r => r.key === updatedRobotInfo.key ? { ...r, ...updatedRobotInfo } : r);
           });
           if (!selectedRobotId) {
              setSelectedRobotIdInternal(updatedRobotInfo.alias);

@@ -10,6 +10,22 @@ import argparse
 import math
 from dotenv import load_dotenv
 import base64
+import io
+# Optional heavy dependencies (used for map/occupancy features). We guard-import to avoid editor import errors if
+# the active interpreter isn't set yet. At runtime, map features will raise a clear error if these are missing.
+try:
+    import numpy as np  # type: ignore
+except Exception:  # ImportError or environment issues
+    np = None  # type: ignore
+try:
+    from PIL import Image  # type: ignore
+except Exception:
+    Image = None  # type: ignore
+try:
+    # Local lightweight DB (SQLite by default)
+    from database import Database  # type: ignore
+except Exception:
+    Database = None  # type: ignore
 
 # Load environment variables from .env file and optional env_config.txt
 load_dotenv()  # .env in current working dir
@@ -32,6 +48,12 @@ LOG_DIRECTORY_DEFAULT = "logs/bridge_logs"
 MAX_TRAJECTORY_POINTS_DEFAULT = 1000
 WHEEL_RADIUS_DEFAULT = 0.0325
 ROBOT_BASE_DISTANCE_L_DEFAULT = 0.1
+# For mecanum, you can override via env:
+#  - WHEEL_RADIUS (meters)
+#  - MECANUM_LX (half width, meters)
+#  - MECANUM_LY (half length, meters)
+MECANUM_LX_DEFAULT = 0.1  # half-width (m) from center to wheel along x
+MECANUM_LY_DEFAULT = 0.1  # half-length (m) from center to wheel along y
 PID_CONFIG_FILE_DEFAULT = "pid_config.txt"
 TEMP_FIRMWARE_DIR_DEFAULT = "temp_firmware"
 TCP_CLIENT_TIMEOUT_DEFAULT = 60.0
@@ -51,21 +73,31 @@ ui_websockets = set()
 
 # --- Helper function to broadcast to all UI clients ---
 async def broadcast_to_all_ui(message_payload):
-    if ui_websockets: # Check if there are any UI clients
+    if ui_websockets:  # Check if there are any UI clients
         message_json = json.dumps(message_payload)
-        # Create a list of tasks to send messages concurrently
-        tasks = [ws.send(message_json) for ws in ui_websockets]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, result in enumerate(results):
+        # Snapshot to avoid concurrent set mutation and index-based lookups
+        recipients = list(ui_websockets)
+        results = await asyncio.gather(*[ws.send(message_json) for ws in recipients], return_exceptions=True)
+        for ws, result in zip(recipients, results):
             if isinstance(result, Exception):
-                ws_to_remove = list(ui_websockets)[i] # This indexing might be fragile if set changes during await
-                logger.error(f"Error sending to UI websocket {ws_to_remove.remote_address}: {result}. Removing.")
+                logger.error(f"Error sending to UI websocket {getattr(ws, 'remote_address', None)}: {result}. Removing.")
+                try:
+                    ui_websockets.discard(ws)
+                except Exception:
+                    pass
                 
 # --- TrajectoryCalculator class ---
 class TrajectoryCalculator: 
     def __init__(self):
         self.robot_data = {}  # Keyed by unique_robot_key (ip:port or alias/IP)
         self.CONTROL_SUPPRESS_WINDOW = 0.5  # seconds: if encoder seen recently, skip control integration
+        # Per-robot type: 'omni' (3-wheel) | 'mecanum' (4-wheel). Default 'omni'
+        self.robot_types = {}
+
+    def set_robot_type(self, unique_robot_key: str, robot_type: str):
+        if robot_type not in ("omni", "mecanum"):
+            return
+        self.robot_types[unique_robot_key] = robot_type
 
     def _ensure_robot_data(self, unique_robot_key):
         if unique_robot_key not in self.robot_data:
@@ -152,9 +184,9 @@ class TrajectoryCalculator:
         timestamp_encoder = encoder_data.get("timestamp", time.time())
         # The 'data' key in encoder_data from transform_robot_message contains the RPM list
         rpms = encoder_data.get("data", []) # Use "data" as per transform_robot_message
-        
-        if not (isinstance(rpms, list) and len(rpms) >= 3): # Check for at least 3 for safety
-            logger.warning(f"Invalid RPM data for {unique_robot_key}: {rpms}. Expected list of 3 numbers in 'data' field. Returning current state.")
+
+        if not (isinstance(rpms, list) and len(rpms) >= 3):  # minimal sanity check
+            logger.warning(f"Invalid RPM data for {unique_robot_key}: {rpms}. Expected list of >=3 numbers in 'data' field. Returning current state.")
             current_pose_dict = {"x": robot_state["x"], "y": robot_state["y"], "theta": robot_state["theta"]}
             # Return the structured dictionary
             return {"position": current_pose_dict, "path": list(robot_state["path_history"])}
@@ -172,10 +204,33 @@ class TrajectoryCalculator:
         if dt <= 0:
             return None
         robot_state["last_timestamp_encoder"] = timestamp_encoder
-        omega_m1, omega_m2, omega_m3 = [self._rpm_to_omega(rpm) for rpm in rpms]
-        # Simple kinematics: vx = avg(omegas) * wheel_radius
-        vx_robot = WHEEL_RADIUS_DEFAULT * (omega_m1 + omega_m2 + omega_m3) / 3.0
-        vy_robot = 0  # For 3-wheel omni, you may want to use a more complex model
+        # Determine kinematic model by robot type
+        robot_type = self.robot_types.get(unique_robot_key, "omni")
+        # Heuristic: if we receive 4+ wheel RPMs but type not set to mecanum, assume mecanum
+        # to avoid mis-integration when UI hasn't sent set_robot_type yet.
+        if robot_type != "mecanum" and isinstance(rpms, list) and len(rpms) >= 4:
+            robot_type = "mecanum"
+        vx_robot = 0.0
+        vy_robot = 0.0
+        omega_body = 0.0
+
+        if robot_type == "mecanum" and len(rpms) >= 4:
+            # Convert to rad/s
+            w1, w2, w3, w4 = [self._rpm_to_omega(rpm) for rpm in rpms[:4]]
+            r = float(os.environ.get("WHEEL_RADIUS", WHEEL_RADIUS_DEFAULT))
+            lx = float(os.environ.get("MECANUM_LX", MECANUM_LX_DEFAULT))
+            ly = float(os.environ.get("MECANUM_LY", MECANUM_LY_DEFAULT))
+            Lsum = (lx + ly) if (lx + ly) != 0 else 1e-6
+            # Standard mecanum forward kinematics (wheel order assumed: FL, FR, RL, RR)
+            # Note: depending on roller orientation, the signs for vy/omega rows might need flipping.
+            vx_robot = (r / 4.0) * (w1 + w2 + w3 + w4)
+            vy_robot = (r / 4.0) * (-w1 + w2 + w3 - w4)
+            omega_body = (r / (4.0 * Lsum)) * (-w1 + w2 - w3 + w4)
+        else:
+            # 3-wheel omni (legacy): simple average forward velocity, no lateral velocity modeled
+            omega_m1, omega_m2, omega_m3 = [self._rpm_to_omega(rpm) for rpm in rpms[:3]]
+            vx_robot = WHEEL_RADIUS_DEFAULT * (omega_m1 + omega_m2 + omega_m3) / 3.0
+            vy_robot = 0.0
 
         # Transform robot-frame velocities to world-frame using standard rotation
         theta = robot_state["theta"]
@@ -185,7 +240,11 @@ class TrajectoryCalculator:
         vy_world = vx_robot * sin_h + vy_robot * cos_h
         robot_state["x"] += vx_world * dt
         robot_state["y"] += vy_world * dt
-        robot_state["theta"] = current_heading_rad
+        # Heading from IMU is authoritative when present; otherwise integrate omega
+        if imu_data is not None:
+            robot_state["theta"] = current_heading_rad
+        else:
+            robot_state["theta"] += omega_body * dt
         # Since we used reliable encoder data, reset control integration timer to avoid stale dt accumulation
         robot_state["last_timestamp_control"] = None
         # At the end of successful calculation:
@@ -372,6 +431,13 @@ log_fw = logger.getChild("FWUP")
 log_traj = logger.getChild("TRAJ")
 # Initialize DataLogger with None, so it picks up from env or default
 data_logger = DataLogger()
+
+
+# Ensure DirectBridge has safe defaults for websocket subscription bookkeeping even if constructed elsewhere
+try:
+    from types import SimpleNamespace
+except Exception:
+    SimpleNamespace = None
 
 
 # --- OTAConnection class (Handles OTA Server Functionality) ---
@@ -579,7 +645,6 @@ class OTAConnection:
             logger.info("OTA Server stopped by request.")
         self._firmware_map.clear()
 
-# ==================== FirmwareUploadManager ====================
 class FirmwareUploadManager:
     """
     Gom từng chunk b64 rồi ghi ra file .bin trong TEMP_FIRMWARE_DIR.
@@ -630,8 +695,6 @@ class FirmwareUploadManager:
         if robot_ip in self._uploads:
             return self._uploads[robot_ip]["received"]
         return 0
-# ===============================================================
-
 
 class DirectBridge:
     GLOBAL_SUBSCRIPTION_KEY = "__GLOBAL__" # Định nghĩa hằng số ở đây
@@ -652,7 +715,166 @@ class DirectBridge:
         self.subscribers_lock = asyncio.Lock() # Added lock for subscribers dictionary
         self._latest_encoder_data = {} # Initialize latest encoder data
         self._latest_imu_data = {} # Initialize latest IMU data
+        # Track robot type per unique robot key (e.g., "ip:port").
+        # Values: "omni" or "mecanum". Default will be set on first connection.
+        self.robot_type_by_key = {}
+        # Database (SQLite by default). If SQLAlchemy not installed, keep None.
+        try:
+            self.db = Database(os.environ.get("DB_URL")) if Database else None
+        except Exception as e:
+            logger.error(f"Failed to initialize Database: {e}")
+            self.db = None
         self.fw_upload_mgr = FirmwareUploadManager(self.temp_firmware_dir)
+        # Map and navigation
+        self.grid_map = None  # {"occ": np.ndarray(bool), "resolution": float, "origin": (ox, oy), "size": (w,h)}
+        self._nav_tasks = {}
+
+    # ===== Map helpers =====
+    def _load_occupancy_from_image(self, b64_png: str, threshold: int = 127):
+        """Decode base64 image to occupancy (True=occupied). Returns (occ, w, h)."""
+        if Image is None or np is None:
+            raise RuntimeError("Map features require numpy and Pillow. Please install 'numpy' and 'Pillow' in the Python environment running the backend.")
+        img_bytes = base64.b64decode(b64_png)
+        with Image.open(io.BytesIO(img_bytes)) as im:
+            im = im.convert("L")
+            arr = np.array(im)
+        h, w = arr.shape
+        occ = arr < max(0, min(255, threshold))
+        return occ, w, h
+
+    def _world_to_grid(self, x: float, y: float):
+        if not self.grid_map:
+            return 0, 0
+        ox, oy = self.grid_map["origin"]
+        res = self.grid_map["resolution"]
+        gx = int((x - ox) / res)
+        gy = int((y - oy) / res)
+        return gx, gy
+
+    def _grid_to_world(self, gx: int, gy: int):
+        ox, oy = self.grid_map["origin"]
+        res = self.grid_map["resolution"]
+        return ox + gx * res, oy + gy * res
+
+    def _neighbors(self, x: int, y: int, w: int, h: int):
+        for dx, dy, cost in ((1,0,1),(-1,0,1),(0,1,1),(0,-1,1),(1,1,math.sqrt(2)),(1,-1,math.sqrt(2)),(-1,1,math.sqrt(2)),(-1,-1,math.sqrt(2))):
+            nx, ny = x+dx, y+dy
+            if 0 <= nx < w and 0 <= ny < h:
+                yield nx, ny, cost
+
+    def _astar(self, start, goal):
+        if not self.grid_map:
+            return None
+        occ = self.grid_map["occ"]
+        h, w = occ.shape
+        sx, sy = start
+        gx, gy = goal
+        if not (0 <= sx < w and 0 <= sy < h and 0 <= gx < w and 0 <= gy < h):
+            return None
+        if occ[sy, sx] or occ[gy, gx]:
+            return None
+        import heapq
+        open_heap = []
+        heapq.heappush(open_heap, (0.0, (sx, sy)))
+        g_cost = {(sx,sy): 0.0}
+        parent = {}
+        def hfun(nx, ny):
+            return math.hypot(nx-gx, ny-gy)
+        visited = set()
+        while open_heap:
+            _, (cx, cy) = heapq.heappop(open_heap)
+            if (cx, cy) in visited:
+                continue
+            visited.add((cx, cy))
+            if (cx, cy) == (gx, gy):
+                path = [(cx, cy)]
+                while (cx, cy) in parent:
+                    cx, cy = parent[(cx, cy)]
+                    path.append((cx, cy))
+                path.reverse()
+                return path
+            for nx, ny, step in self._neighbors(cx, cy, w, h):
+                if occ[ny, nx]:
+                    continue
+                tentative = g_cost[(cx, cy)] + step
+                if tentative < g_cost.get((nx, ny), 1e18):
+                    g_cost[(nx, ny)] = tentative
+                    parent[(nx, ny)] = (cx, cy)
+                    heapq.heappush(open_heap, (tentative + hfun(nx, ny), (nx, ny)))
+        return None
+
+    def _simplify_path(self, grid_path, max_keep: int = 500):
+        if not grid_path:
+            return []
+        simplified = [grid_path[0]]
+        def collinear(a,b,c):
+            return (b[0]-a[0])*(c[1]-a[1]) == (b[1]-a[1])*(c[0]-a[0])
+        for p in grid_path[1:-1]:
+            if len(simplified) < 2 or not collinear(simplified[-2], simplified[-1], p):
+                simplified.append(p)
+        simplified.append(grid_path[-1])
+        if len(simplified) > max_keep:
+            step = max(1, len(simplified)//max_keep)
+            simplified = simplified[::step]
+            if simplified[-1] != grid_path[-1]:
+                simplified.append(grid_path[-1])
+        return simplified
+
+    async def _follow_path(self, robot_alias: str, world_path, speed: float = 0.2, reach_tol: float = 0.08):
+        try:
+            await self.broadcast_to_subscribers(robot_alias, {
+                "type": "navigation_status",
+                "robot_ip": robot_alias,
+                "robot_alias": robot_alias,
+                "timestamp": time.time(),
+                "status": "started"
+            })
+            for (wx, wy) in world_path:
+                await self.handle_internal_command({"command": "position_control", "robot_alias": robot_alias, "x": wx, "y": wy, "vel": speed})
+                deadline = time.time() + 8.0
+                while time.time() < deadline:
+                    unique_key = await self.get_robot_key_from_alias(robot_alias)
+                    if not unique_key:
+                        break
+                    snap = self.trajectory_calculator.get_snapshot(unique_key)
+                    if isinstance(snap, dict) and isinstance(snap.get("position"), dict):
+                        pos = snap["position"]
+                        if math.hypot(pos.get("x",0)-wx, pos.get("y",0)-wy) <= reach_tol:
+                            break
+                    await asyncio.sleep(0.1)
+            await self.broadcast_to_subscribers(robot_alias, {
+                "type": "navigation_status",
+                "robot_ip": robot_alias,
+                "robot_alias": robot_alias,
+                "timestamp": time.time(),
+                "status": "completed"
+            })
+        except asyncio.CancelledError:
+            await self.broadcast_to_subscribers(robot_alias, {
+                "type": "navigation_status",
+                "robot_ip": robot_alias,
+                "robot_alias": robot_alias,
+                "timestamp": time.time(),
+                "status": "cancelled"
+            })
+            raise
+
+    async def handle_internal_command(self, data: dict):
+        command = data.get("command")
+        robot_alias = data.get("robot_alias")
+        if command == "position_control":
+            try:
+                pos_x = float(data.get("x"))
+                pos_y = float(data.get("y"))
+                vel = float(data.get("vel", 0.2))
+                if not robot_alias:
+                    return False
+                cmd_str = f"x:{pos_x} y:{pos_y} vel:{vel}"
+                ok = await self.send_text_command_by_alias(robot_alias, cmd_str)
+                return ok
+            except Exception:
+                return False
+        return False
 
     def build_robot_status_snapshot(self, unique_robot_key: str, robot_alias: str, robot_ip: str):
         """Assemble a robot_status snapshot from latest cached data."""
@@ -661,9 +883,10 @@ class DirectBridge:
         if isinstance(latest_enc, dict):
             data_field = latest_enc.get("data")
             if isinstance(data_field, list):
-                rpm_list = data_field[:3]
+                rpm_list = data_field[:]  # keep all provided encoder channels
+        # Normalize to at least 3 values for legacy consumers
         if len(rpm_list) < 3:
-            rpm_list = [0, 0, 0]
+            rpm_list = (rpm_list + [0, 0, 0])[:3]
 
         pose = {"x": 0.0, "y": 0.0, "theta": 0.0}
         snap = self.trajectory_calculator.get_snapshot(unique_robot_key)
@@ -680,6 +903,7 @@ class DirectBridge:
             "timestamp": time.time(),
             "encoders": {"rpm": rpm_list},
             "position": pose,
+            "robot_type": getattr(self, 'robot_type_by_key', {}).get(unique_robot_key, "omni"),
         }
         return payload
 
@@ -755,11 +979,13 @@ class DirectBridge:
                 ip = item.get("ip")
                 port = item.get("port")
                 alias_unique = f"{ip}:{port}" if ip and port is not None else ip
+                ukey = item.get("robot_id")
                 robots_list.append({
                     "alias": alias_unique,
                     "ip": ip,
-                    "unique_key": item.get("robot_id"),
-                    "status": "connected"
+                    "unique_key": ukey,
+                    "status": "connected",
+                    "robot_type": getattr(self, 'robot_type_by_key', {}).get(ukey, "omni")
                 })
         return robots_list
 
@@ -910,6 +1136,9 @@ class DirectBridge:
             self.handle_ws_client, 
             '0.0.0.0', 
             self.ws_port,
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=8*1024*1024,
             #additional_headers=self.get_websocket_cors_headers
         )
         log_ws.info(f"WebSocket server started on 0.0.0.0:{self.ws_port}")
@@ -952,6 +1181,15 @@ class DirectBridge:
         )
         log_tcp.info(f"Client {current_alias} ({unique_robot_key}) registered with ConnectionManager.")
 
+        # Initialize robot type default on first sight
+        if unique_robot_key not in getattr(self, 'robot_type_by_key', {}):
+            self.robot_type_by_key[unique_robot_key] = "omni"
+            # Also mirror into calculator for kinematics decisions
+            try:
+                self.trajectory_calculator.set_robot_type(unique_robot_key, "omni")
+            except Exception:
+                pass
+
         log_tcp.info(f"Processing started for {current_alias} ({unique_robot_key}).")
         
         # Không gửi JSON ACK qua TCP cho robot. Firmware chỉ mong đợi lệnh plaintext
@@ -985,12 +1223,19 @@ class DirectBridge:
                 "ip": robot_ip_address,
                 "alias": current_alias,
                 "unique_key": unique_robot_key,
-                "status": "connected" 
+                "status": "connected",
+                "robot_type": self.robot_type_by_key.get(unique_robot_key, "omni"),
             },
             "timestamp": time.time()
         }
         await broadcast_to_all_ui(robot_announcement_payload)
         robot_announced_to_ui = True
+        # Upsert robot metadata in DB
+        if getattr(self, "db", None):
+            try:
+                self.db.upsert_robot(unique_robot_key, current_alias, robot_ip_address, self.robot_type_by_key.get(unique_robot_key, "omni"), "connected")
+            except Exception as e:
+                logger.error(f"DB upsert_robot failed for {unique_robot_key}: {e}")
 
         try:
             # Giai đoạn 1: Gửi xác nhận kết nối cho Robot (đã làm ở trên)
@@ -1062,6 +1307,44 @@ class DirectBridge:
                         message_timestamp = transformed_message.get("timestamp")
 
                         if encoder_rpms_list is not None and message_timestamp is not None and isinstance(encoder_rpms_list, list) and len(encoder_rpms_list) >= 3:
+                            # Auto-detect mecanum on first 4+ channel encoder message and propagate to UI
+                            try:
+                                if len(encoder_rpms_list) >= 4:
+                                    prev_type = getattr(self, 'robot_type_by_key', {}).get(unique_robot_key, "omni")
+                                    if prev_type != "mecanum":
+                                        # Update backend state
+                                        self.robot_type_by_key[unique_robot_key] = "mecanum"
+                                        try:
+                                            self.trajectory_calculator.set_robot_type(unique_robot_key, "mecanum")
+                                        except Exception:
+                                            pass
+                                        # Update DB robot_type
+                                        if getattr(self, "db", None):
+                                            try:
+                                                self.db.update_robot_type(unique_robot_key, "mecanum")
+                                            except Exception as e:
+                                                logger.error(f"DB update_robot_type failed for {unique_robot_key}: {e}")
+                                        # Notify UI list item so TrajectoryWidget can switch icon
+                                        await broadcast_to_all_ui({
+                                            "type": "available_robot_update",
+                                            "action": "update",
+                                            "robot": {
+                                                "ip": current_alias,
+                                                "alias": current_alias,
+                                                "unique_key": unique_robot_key,
+                                                "status": "connected",
+                                                "robot_type": "mecanum",
+                                            },
+                                            "timestamp": time.time(),
+                                        })
+                            except Exception:
+                                pass
+                            # Persist encoders
+                            if getattr(self, "db", None):
+                                try:
+                                    self.db.insert_encoder(unique_robot_key, encoder_rpms_list, message_timestamp)
+                                except Exception as e:
+                                    logger.error(f"DB insert_encoder failed for {unique_robot_key}: {e}")
                             # Cache latest encoder snapshot for robot_status
                             self._latest_encoder_data[unique_robot_key] = transformed_message
                             # Prepare payload for TrajectoryCalculator
@@ -1122,6 +1405,12 @@ class DirectBridge:
                         # {"type": "imu_data", "robot_ip": ..., "robot_alias": ..., "timestamp": ..., "data": {"time":..., "euler":..., "quaternion":...}}
                         self._latest_imu_data[unique_robot_key] = transformed_message # Store the whole transformed payload
                         
+                        # Persist IMU
+                        if getattr(self, "db", None):
+                            try:
+                                self.db.insert_imu(unique_robot_key, transformed_message.get("data", {}), transformed_message.get("timestamp"))
+                            except Exception as e:
+                                logger.error(f"DB insert_imu failed for {unique_robot_key}: {e}")
                         # Update IMU data in the trajectory calculator immediately
                         imu_result = self.trajectory_calculator.update_imu_data(unique_robot_key, transformed_message.get("data", {}))
                         # Broadcast trajectory snapshot based on IMU to allow drawing even with IMU-only
@@ -1144,18 +1433,24 @@ class DirectBridge:
                         # {"type": "position_update", "data": {"x": float(m), "y": float(m), "theta": float(rad)}}
                         pos_data = transformed_message.get("data", {})
                         traj_res = self.trajectory_calculator.update_position_packet(unique_robot_key, pos_data)
-                        if isinstance(traj_res, dict) and isinstance(traj_res.get("position"), dict) and isinstance(traj_res.get("path"), list):
-                            traj_payload = {
-                                "type": "realtime_trajectory",
-                                "robot_ip": robot_ip_address,
-                                "robot_alias": current_alias,
-                                "timestamp": time.time(),
-                                "position": traj_res["position"],
-                                "path": traj_res["path"],
-                            }
-                            await self.broadcast_to_subscribers(current_alias, traj_payload)
+                        # Persist position
+                        if getattr(self, "db", None):
+                            try:
+                                self.db.insert_position(unique_robot_key, float(pos_data.get("x", 0.0)), float(pos_data.get("y", 0.0)), float(pos_data.get("theta", 0.0)), transformed_message.get("timestamp"))
+                            except Exception as e:
+                                logger.error(f"DB insert_position failed for {unique_robot_key}: {e}")
+                        if isinstance(traj_res, dict) and isinstance(traj_res.get("position"), dict):
+                            # transformed_message was already broadcast above; just update and broadcast status
                             robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
                             await self.broadcast_to_subscribers(current_alias, robot_status_payload)
+                    elif msg_type == "log":
+                        # Persist logs (if robot sends textual logs)
+                        if getattr(self, "db", None):
+                            try:
+                                message_txt = transformed_message.get("message") or transformed_message.get("data") or ""
+                                self.db.insert_log(unique_robot_key, str(message_txt), level=str(transformed_message.get("level", "INFO")), timestamp=transformed_message.get("timestamp"))
+                            except Exception as e:
+                                logger.error(f"DB insert_log failed for {unique_robot_key}: {e}")
 
                 except json.JSONDecodeError:
                     log_tcp.error(f"Invalid JSON from {current_alias} ({robot_ip_address}) (Control): {raw_data_str}")
@@ -1204,6 +1499,12 @@ class DirectBridge:
                     "timestamp": time.time()
                 }
                 await broadcast_to_all_ui(robot_disconnect_payload)
+            # Mark robot disconnected in DB
+            if getattr(self, "db", None):
+                try:
+                    self.db.set_robot_status(unique_robot_key, "disconnected")
+                except Exception as e:
+                    logger.error(f"DB set_robot_status(disconnected) failed for {unique_robot_key}: {e}")
 
             if writer and not writer.is_closing():
                 writer.close()
@@ -1341,8 +1642,8 @@ class DirectBridge:
                         logger.info(f"{ws_identifier} subscribed to '{data_type_to_sub}' for '{display_target}' (Key: {actual_subscription_entity_key}) using 'subscribe' command.")
                         await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_sub, "subscribed_key": actual_subscription_entity_key, "robot_alias": target_alias}))
 
-                        # Immediately send snapshot for realtime_trajectory if requested
-                        if data_type_to_sub == "realtime_trajectory":
+                        # Immediately send snapshot for realtime_trajectory or position_update if requested
+                        if data_type_to_sub in ("realtime_trajectory", "position_update"):
                             # Resolve unique key from alias (IP)
                             unique_robot_key = await self.get_robot_key_from_alias(target_alias)
                             try:
@@ -1358,16 +1659,26 @@ class DirectBridge:
                                         "path": []
                                     }
 
-                                snapshot_payload = {
-                                    "type": "realtime_trajectory",
-                                    "robot_ip": target_alias,
-                                    "robot_alias": target_alias,
-                                    "timestamp": time.time(),
-                                    "position": snap["position"],
-                                    "path": snap["path"],
-                                }
+                                # For position_update subscription, send only position
+                                if data_type_to_sub == "position_update":
+                                    snapshot_payload = {
+                                        "type": "position_update",
+                                        "robot_ip": target_alias,
+                                        "robot_alias": target_alias,
+                                        "timestamp": time.time(),
+                                        "position": snap["position"],
+                                    }
+                                else:
+                                    snapshot_payload = {
+                                        "type": "realtime_trajectory",
+                                        "robot_ip": target_alias,
+                                        "robot_alias": target_alias,
+                                        "timestamp": time.time(),
+                                        "position": snap["position"],
+                                        "path": snap["path"],
+                                    }
                                 await websocket.send(json.dumps(snapshot_payload))
-                                logger.info(f"Sent initial trajectory snapshot to {ws_identifier} for {target_alias} with {len(snap['path'])} points.")
+                                logger.info(f"Sent initial {'position' if data_type_to_sub=='position_update' else 'trajectory'} snapshot to {ws_identifier} for {target_alias}.")
                             except Exception as e:
                                 logger.error(f"Error sending trajectory snapshot to {ws_identifier}: {e}")
 
@@ -1606,6 +1917,67 @@ class DirectBridge:
                                 "status": "error",
                                 "message": str(e)
                             }))
+                    elif command == "upload_map":
+                        try:
+                            b64_data = data.get("data")
+                            resolution = float(data.get("resolution", 0.02))
+                            origin_x = float(data.get("origin_x", 0.0))
+                            origin_y = float(data.get("origin_y", 0.0))
+                            threshold = int(data.get("threshold", 127))
+                            if not b64_data:
+                                raise ValueError("Missing base64 'data'")
+                            occ, w, h = self._load_occupancy_from_image(b64_data, threshold)
+                            self.grid_map = {"occ": occ, "resolution": resolution, "origin": (origin_x, origin_y), "size": (w, h)}
+                            await websocket.send(json.dumps({"type": "map_loaded", "width": w, "height": h, "resolution": resolution, "origin_x": origin_x, "origin_y": origin_y}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
+                    elif command == "navigate_to":
+                        try:
+                            robot_alias = data.get("robot_alias") or data.get("robot_ip")
+                            goal_x = float(data.get("x"))
+                            goal_y = float(data.get("y"))
+                            speed = float(data.get("speed", 0.2))
+                            if not robot_alias:
+                                raise ValueError("Missing robot_alias")
+                            unique_key = await self.get_robot_key_from_alias(robot_alias)
+                            if not unique_key:
+                                raise ValueError("Robot not connected")
+                            snap = self.trajectory_calculator.get_snapshot(unique_key)
+                            if not (isinstance(snap, dict) and isinstance(snap.get("position"), dict)):
+                                raise ValueError("No pose available")
+                            start_pos = snap["position"]
+                            world_path = []
+                            if self.grid_map:
+                                s_gx, s_gy = self._world_to_grid(start_pos.get("x",0), start_pos.get("y",0))
+                                g_gx, g_gy = self._world_to_grid(goal_x, goal_y)
+                                grid_path = self._astar((s_gx, s_gy), (g_gx, g_gy))
+                                if not grid_path:
+                                    raise ValueError("No path found")
+                                grid_path = self._simplify_path(grid_path)
+                                world_path = [self._grid_to_world(cx, cy) for (cx, cy) in grid_path]
+                            else:
+                                steps = 10
+                                sx = float(start_pos.get("x", 0.0))
+                                sy = float(start_pos.get("y", 0.0))
+                                world_path = [
+                                    (sx + (goal_x - sx) * i / (steps - 1), sy + (goal_y - sy) * i / (steps - 1))
+                                    for i in range(steps)
+                                ]
+                            await self.broadcast_to_subscribers(robot_alias, {"type": "planned_path", "robot_ip": robot_alias, "robot_alias": robot_alias, "timestamp": time.time(), "points": [{"x": x, "y": y} for (x,y) in world_path]})
+                            if robot_alias in self._nav_tasks and not self._nav_tasks[robot_alias].done():
+                                self._nav_tasks[robot_alias].cancel()
+                            self._nav_tasks[robot_alias] = asyncio.create_task(self._follow_path(robot_alias, world_path, speed))
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"started","robot_alias": robot_alias}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
+                    elif command == "cancel_navigation":
+                        try:
+                            robot_alias = data.get("robot_alias") or data.get("robot_ip")
+                            if robot_alias in self._nav_tasks and not self._nav_tasks[robot_alias].done():
+                                self._nav_tasks[robot_alias].cancel()
+                            await websocket.send(json.dumps({"type":"ack","command":command,"status":"cancelled","robot_alias": robot_alias}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
                     elif command == "load_pid_config":
                         # expects: robot_ip (preferred). Fall back to robot_alias if provided
                         try:
@@ -1633,6 +2005,40 @@ class DirectBridge:
                                 "status": "error",
                                 "message": str(e)
                             }))
+                    elif command == "set_robot_type":
+                        try:
+                            target_alias = data.get("robot_alias") or data.get("robot_ip")
+                            rtype = str(data.get("robot_type", "")).lower()
+                            if rtype not in ("omni", "mecanum"):
+                                raise ValueError("robot_type must be 'omni' or 'mecanum'")
+                            if not target_alias:
+                                raise ValueError("Missing robot_alias")
+                            unique_key = await self.get_robot_key_from_alias(target_alias)
+                            if not unique_key:
+                                raise ValueError("Robot not connected")
+                            # store
+                            self.robot_type_by_key[unique_key] = rtype
+                            # update calculator as well
+                            try:
+                                self.trajectory_calculator.set_robot_type(unique_key, rtype)
+                            except Exception:
+                                pass
+                            await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "robot_alias": target_alias, "robot_type": rtype}))
+                            # notify UI list item
+                            await broadcast_to_all_ui({
+                                "type": "available_robot_update",
+                                "action": "update",
+                                "robot": {
+                                    "ip": target_alias,
+                                    "alias": target_alias,
+                                    "unique_key": unique_key,
+                                    "status": "connected",
+                                    "robot_type": rtype,
+                                },
+                                "timestamp": time.time(),
+                            })
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
                     elif command in ("upgrade", "upgrade_signal"):
                         # Trigger OTA switch on device to connect to OTA server
                         if robot_alias:
@@ -1664,6 +2070,16 @@ class DirectBridge:
                             await websocket.send(json.dumps(payload))
                         except Exception as e:
                             await websocket.send(json.dumps({"type": "error", "command": command, "message": str(e)}))
+                    elif command == "get_available_robots":
+                        try:
+                            robots = await self.get_connected_robots_list()
+                            await websocket.send(json.dumps({
+                                "type": "available_robots_initial_list",
+                                "robots": robots,
+                                "timestamp": time.time(),
+                            }))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
                     
                     # ... (other potential commands like 'get_pid', 'set_pid', etc.) ...
 

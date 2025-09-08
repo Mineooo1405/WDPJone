@@ -1,5 +1,0 @@
-Time Message
-1757048946.544 Manual log from UI
-1757048954.272 Manual log from UI
-1757048955.032 Manual log from UI
-1757048955.242 Manual log from UI

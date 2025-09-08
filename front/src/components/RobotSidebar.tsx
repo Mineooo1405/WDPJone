@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useRobotContext, ReadyState } from './RobotContext';
+import type { ConnectedRobot } from './RobotContext';
 import { X, Bot, RefreshCw, Search, LayoutGrid, Check, Pin, PinOff } from 'lucide-react';
 
 interface RobotSidebarProps {
@@ -11,16 +12,16 @@ interface RobotSidebarProps {
 }
 
 const RobotSidebar: React.FC<RobotSidebarProps> = ({ open, onClose, widgets, activeWidgetTypes, onToggleWidget }) => {
-  const { connectedRobots, selectedRobotId, setSelectedRobotId, requestRobotListUpdate, readyState, pinnedRobotAliases, addPinnedRobot, removePinnedRobot } = useRobotContext();
+  const { connectedRobots, selectedRobotId, setSelectedRobotId, requestRobotListUpdate, readyState, pinnedRobotAliases, addPinnedRobot, removePinnedRobot, sendJsonMessage } = useRobotContext() as any;
   const [query, setQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'robots' | 'widgets'>('robots');
   const [showOnlyPinned, setShowOnlyPinned] = useState(false);
 
-  const filtered = useMemo(() => {
+  const filtered: ConnectedRobot[] = useMemo(() => {
     if (!query) return connectedRobots;
     const q = query.toLowerCase();
-    const base = connectedRobots.filter(r => r.alias.toLowerCase().includes(q) || (r.ip || '').toLowerCase().includes(q));
-    return showOnlyPinned ? base.filter(r => pinnedRobotAliases.includes(r.alias)) : base;
+    const base = connectedRobots.filter((r: ConnectedRobot) => r.alias.toLowerCase().includes(q) || (r.ip || '').toLowerCase().includes(q));
+    return showOnlyPinned ? base.filter((r: ConnectedRobot) => pinnedRobotAliases.includes(r.alias)) : base;
   }, [connectedRobots, query, showOnlyPinned, pinnedRobotAliases]);
 
   if (!open) return null;
@@ -105,7 +106,7 @@ const RobotSidebar: React.FC<RobotSidebarProps> = ({ open, onClose, widgets, act
               </div>
             ) : (
               <ul className="divide-y divide-gray-200 dark:divide-gray-700">
-                {filtered.map((r) => {
+                {filtered.map((r: ConnectedRobot) => {
                   const isActive = r.alias === selectedRobotId;
                   return (
                     <li key={r.key}>
@@ -121,6 +122,19 @@ const RobotSidebar: React.FC<RobotSidebarProps> = ({ open, onClose, widgets, act
                             </div>
                             <div className="text-xs text-gray-500 dark:text-gray-400 ml-4">{r.ip}</div>
                           </button>
+                          {/* Robot type selector */}
+                          <select
+                            className="text-xs px-1.5 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200"
+                            value={r.robot_type || 'omni'}
+                            onChange={(e) => {
+                              const value = e.target.value as 'omni' | 'mecanum';
+                              sendJsonMessage({ command: 'set_robot_type', robot_alias: r.alias, robot_type: value });
+                            }}
+                            title="Chọn loại robot"
+                          >
+                            <option value="omni">Omni</option>
+                            <option value="mecanum">Mecanum</option>
+                          </select>
                           <button
                             onClick={() => (pinnedRobotAliases.includes(r.alias) ? removePinnedRobot(r.alias) : addPinnedRobot(r.alias))}
                             className={`p-1.5 rounded-md border ${pinnedRobotAliases.includes(r.alias) ? 'bg-amber-100 text-amber-700 border-amber-300' : 'text-gray-600 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-600'}`}

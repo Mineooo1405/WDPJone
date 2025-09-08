@@ -1,4 +1,5 @@
-const WEBSOCKET_URL = process.env.REACT_APP_WS_BRIDGE_URL || 'ws://localhost:9003/ws'; // Lấy từ biến môi trường hoặc mặc định
+// Use the same default URL as start.py writes to .env (no trailing path)
+const WEBSOCKET_URL = process.env.REACT_APP_WS_BRIDGE_URL || 'ws://localhost:9003'; // Lấy từ biến môi trường hoặc mặc định
 const RECONNECT_INTERVAL = 5000; // Thử kết nối lại sau mỗi 5 giây
 
 type MessageListener = (data: any) => void;
@@ -98,7 +99,9 @@ class WebSocketService {
       this.notifyConnectionStatusChange(false);
       this.socket = null;
 
-      if (!this.explicitlyClosed && !event.wasClean) { // Chỉ kết nối lại nếu không phải do chủ động đóng hoặc lỗi nghiêm trọng
+      // Always attempt to reconnect unless user explicitly closed it.
+      // Some servers close cleanly on restart; we still want to resume automatically.
+      if (!this.explicitlyClosed) {
         this.scheduleReconnect();
       }
     };
