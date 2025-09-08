@@ -712,19 +712,7 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = AppGUI(root)
     root.mainloop()
-    
-    # This part runs after the Tkinter mainloop has exited
+
     print("Tkinter mainloop exited. Ensuring all processes are stopped as a fallback.")
-    # Check if any managed processes were somehow left (should be cleared by stop_servers)
-    # or if stop_event was not set properly before exit.
-    # A more direct check might be needed if stop_servers wasn't guaranteed to run on exit.
-    # For now, assume stop_servers was called by on_closing_thread.
-    # If we want a truly robust fallback, we might need to re-check PIDs if stored, or ports.
-    # The current on_closing_thread calls stop_servers, so this fallback here is mostly a safety net print.
-    
-    # If stop_servers needs to be called here, it needs the output_queue.
-    # However, the GUI is gone, so output_queue might not be processed.
-    # For simplicity, we rely on on_closing_thread to have handled it.
-    # If you need a more robust non-GUI fallback, it would look different.
     
     print("Application finished.")
