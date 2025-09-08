@@ -4,7 +4,12 @@ import asyncio
 import websockets
 import json
 import logging
-from connection_manager import ConnectionManager 
+try:
+    # Prefer package import when used as a package
+    from back.connection_manager import ConnectionManager
+except Exception:
+    # Fallback to top-level module import for direct script execution
+    from connection_manager import ConnectionManager
 import time
 import argparse
 import math
@@ -375,35 +380,68 @@ class DataLogger:
 
         try:
             log_timestamp = message_dict.get("timestamp", time.time())
-            
-            if data_type == "encoder" or data_type == "encoder_data":
-                log_line = f"{log_timestamp:.3f} {message_dict.get('rpm_1',0)} {message_dict.get('rpm_2',0)} {message_dict.get('rpm_3',0)}\n"
-            elif data_type == "bno055" or data_type == "imu" or data_type == "imu_data":
-                heading = message_dict.get("heading", 0.0)
-                pitch = message_dict.get("pitch", 0.0)
-                roll = message_dict.get("roll", 0.0)
-                w = message_dict.get("quat_w", 1.0) 
-                x = message_dict.get("quat_x", 0.0)
-                y = message_dict.get("quat_y", 0.0)
-                z = message_dict.get("quat_z", 0.0)
-                ax = message_dict.get("lin_accel_x", 0.0)
-                ay = message_dict.get("lin_accel_y", 0.0)
-                az = message_dict.get("lin_accel_z", 0.0)
-                gx = message_dict.get("gravity_x", 0.0)
-                gy = message_dict.get("gravity_y", 0.0)
-                gz = message_dict.get("gravity_z", 0.0)
-                
-                log_line = f"{log_timestamp:.3f} {heading:.2f} {pitch:.2f} {roll:.2f} {w:.4f} {x:.4f} {y:.4f} {z:.4f} {ax:.2f} {ay:.2f} {az:.2f} {gx:.2f} {gy:.2f} {gz:.2f}\n"
-            elif data_type == "log" or data_type == "log_data": 
+
+            # Encoder: support message_dict['data'] = [r1,r2,r3,...] or rpm_1,rpm_2,...
+            if data_type in ("encoder", "encoder_data"):
+                if isinstance(message_dict.get("data"), list):
+                    rpms = message_dict.get("data")
+                    r1 = rpms[0] if len(rpms) > 0 else 0
+                    r2 = rpms[1] if len(rpms) > 1 else 0
+                    r3 = rpms[2] if len(rpms) > 2 else 0
+                else:
+                    r1 = message_dict.get('rpm_1', 0)
+                    r2 = message_dict.get('rpm_2', 0)
+                    r3 = message_dict.get('rpm_3', 0)
+                log_line = f"{log_timestamp:.3f} {r1} {r2} {r3}\n"
+
+            # IMU/BNO055: support nested 'data' with 'euler' and 'quaternion' or flattened keys
+            elif data_type in ("bno055", "imu", "imu_data"):
+                src = message_dict.get("data") if isinstance(message_dict.get("data"), dict) else message_dict
+                heading = 0.0
+                pitch = 0.0
+                roll = 0.0
+                if isinstance(src.get("euler"), (list, tuple)) and len(src.get("euler")) >= 3:
+                    heading, pitch, roll = src.get("euler")[0], src.get("euler")[1], src.get("euler")[2]
+                else:
+                    heading = src.get("heading", heading)
+                    pitch = src.get("pitch", pitch)
+                    roll = src.get("roll", roll)
+
+                if isinstance(src.get("quaternion"), (list, tuple)) and len(src.get("quaternion")) >= 4:
+                    quat_w, quat_x, quat_y, quat_z = src.get("quaternion")[:4]
+                else:
+                    quat_w = src.get("quat_w", 1.0)
+                    quat_x = src.get("quat_x", 0.0)
+                    quat_y = src.get("quat_y", 0.0)
+                    quat_z = src.get("quat_z", 0.0)
+
+                accel = src.get("accel") if isinstance(src.get("accel"), (list, tuple)) else [src.get("lin_accel_x", 0.0), src.get("lin_accel_y", 0.0), src.get("lin_accel_z", 0.0)]
+                ax, ay, az = (accel + [0.0, 0.0, 0.0])[:3]
+
+                gx = src.get("gravity_x", 0.0)
+                gy = src.get("gravity_y", 0.0)
+                gz = src.get("gravity_z", 0.0)
+
+                log_line = f"{log_timestamp:.3f} {heading:.2f} {pitch:.2f} {roll:.2f} {quat_w:.4f} {quat_x:.4f} {quat_y:.4f} {quat_z:.4f} {ax:.2f} {ay:.2f} {az:.2f} {gx:.2f} {gy:.2f} {gz:.2f}\n"
+
+            elif data_type in ("log", "log_data"):
                 log_line = f"{log_timestamp:.3f} {message_dict.get('message', '')}\n"
+
             elif data_type == "position_update":
-                pos = message_dict.get("position", {})
-                log_line = f"{log_timestamp:.3f} {pos.get('x',0):.3f} {pos.get('y',0):.3f} {pos.get('theta',0):.3f}\n"
+                pos = message_dict.get("position") if message_dict.get("position") else message_dict.get("data", {})
+                if isinstance(pos, dict):
+                    px = float(pos.get('x', 0.0))
+                    py = float(pos.get('y', 0.0))
+                    pth = float(pos.get('theta', 0.0))
+                else:
+                    px = py = pth = 0.0
+                log_line = f"{log_timestamp:.3f} {px:.3f} {py:.3f} {pth:.3f}\n"
+
             else:
                 log_line = f"{log_timestamp:.3f} {json.dumps(message_dict)}\n"
-            
+
             file_handle.write(log_line)
-            file_handle.flush() 
+            file_handle.flush()
         except Exception as e:
             logger.error(f"Error writing to log for {unique_robot_key} {data_type}: {e}")
 
@@ -700,8 +738,8 @@ class DirectBridge:
     GLOBAL_SUBSCRIPTION_KEY = "__GLOBAL__" # Định nghĩa hằng số ở đây
 
     def __init__(self, tcp_port, ws_port, pid_config_file_path=None): # Added pid_config_file_path
-        self.manager = ConnectionManager() # Removed robot_alias_manager argument
-        self.tcp_port = tcp_port 
+        self.manager = ConnectionManager()  # Removed robot_alias_manager argument
+        self.tcp_port = tcp_port
         self.ws_port = ws_port
         self.ota_connection = OTAConnection()
         self.trajectory_calculator = TrajectoryCalculator()
@@ -709,12 +747,13 @@ class DirectBridge:
         self.pid_config_cache = {}  # Initialize PID config cache
         self.temp_firmware_dir = os.environ.get("TEMP_FIRMWARE_DIR", TEMP_FIRMWARE_DIR_DEFAULT)
         os.makedirs(self.temp_firmware_dir, exist_ok=True)
-        self.ota_port_arg = None # Will be set from main_bridge_runner
-        self.data_logger = data_logger # Use the global instance
-        self.websocket_subscriptions = {} # Stores subscriptions per websocket client
-        self.subscribers_lock = asyncio.Lock() # Added lock for subscribers dictionary
-        self._latest_encoder_data = {} # Initialize latest encoder data
-        self._latest_imu_data = {} # Initialize latest IMU data
+        self.ota_port_arg = None  # Will be set from main_bridge_runner
+        self.data_logger = data_logger  # Use the global instance
+        self.websocket_subscriptions = {}  # Stores subscriptions per websocket client
+        self.subscribers_lock = asyncio.Lock()  # Added lock for subscribers dictionary
+        self._latest_encoder_data = {}  # Initialize latest encoder data
+        self._latest_imu_data = {}  # Initialize latest IMU data
+        self._last_broadcast_time_by_robot = {}  # rate-limit global broadcasts per robot
         # Track robot type per unique robot key (e.g., "ip:port").
         # Values: "omni" or "mecanum". Default will be set on first connection.
         self.robot_type_by_key = {}
@@ -989,24 +1028,21 @@ class DirectBridge:
                 })
         return robots_list
 
-    async def send_connected_robots_list_to_client(self, websocket_client):
-        """
-        Sends the current list of connected robots to a specific WebSocket client.
+    async def send_connected_robots_list_to_client(self, websocket):
+        """Helper to send the current connected robots list to a newly connected websocket client.
+        Keeps a consistent initial payload format expected by the frontend.
         """
         try:
-            connected_robots = await self.get_connected_robots_list()
-            message_payload = {
-                "type": "available_robots_initial_list", # Or a more descriptive type
-                "robots": connected_robots,
+            robots = await self.get_connected_robots_list()
+            payload = {
+                "type": "available_robots_initial_list",
+                "robots": robots,
                 "timestamp": time.time()
             }
-            await websocket_client.send(json.dumps(message_payload))
-            logger.info(f"Sent initial list of {len(connected_robots)} connected robots to WS client {websocket_client.remote_address}")
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning(f"Failed to send initial robot list to {websocket_client.remote_address}: Connection closed.")
+            await websocket.send(json.dumps(payload))
+            logger.info(f"Sent initial connected robots list to WS client {getattr(websocket, 'remote_address', None)}")
         except Exception as e:
-            logger.error(f"Error sending initial robot list to {websocket_client.remote_address}: {e}", exc_info=True)
-
+            logger.error(f"Failed to send connected robots list to WS client {getattr(websocket, 'remote_address', None)}: {e}")
     def get_websocket_cors_headers(self, path: str, request_headers):
         # request_headers is of type websockets.datastructures.Headers
         # Default frontend origin for Vite dev environment
@@ -1132,13 +1168,16 @@ class DirectBridge:
         )
         log_tcp.info(f"Control server started on 0.0.0.0:{self.tcp_port}")
         
+        ws_ping_interval = int(os.environ.get("WS_PING_INTERVAL", 30))
+        ws_ping_timeout = int(os.environ.get("WS_PING_TIMEOUT", 20))
+        ws_max_size = int(os.environ.get("WS_MAX_SIZE", 1*1024*1024))
         self.ws_server = await websockets.serve(
-            self.handle_ws_client, 
-            '0.0.0.0', 
+            self.handle_ws_client,
+            '0.0.0.0',
             self.ws_port,
-            ping_interval=20,
-            ping_timeout=20,
-            max_size=8*1024*1024,
+            ping_interval=ws_ping_interval,
+            ping_timeout=ws_ping_timeout,
+            max_size=ws_max_size,
             #additional_headers=self.get_websocket_cors_headers
         )
         log_ws.info(f"WebSocket server started on 0.0.0.0:{self.ws_port}")
@@ -1195,24 +1234,28 @@ class DirectBridge:
         # Không gửi JSON ACK qua TCP cho robot. Firmware chỉ mong đợi lệnh plaintext
         # hoặc 'registration_response' sau khi gửi gói 'registration'.
 
-        # Send cached PID config if available
-        if self.pid_config_cache:
+        # Send cached PID config if available. Optional via BRIDGE_SEND_PID_ON_CONNECT env var
+        send_pid_on_connect = os.environ.get("BRIDGE_SEND_PID_ON_CONNECT", "1").strip().lower() not in ("0", "false", "no")
+        if self.pid_config_cache and send_pid_on_connect:
             log_tcp.info(f"Attempting to send cached PID config to newly connected robot {current_alias} ({robot_ip_address}).")
             try:
-                if self.pid_config_cache: # Ensure cache is not empty
-                    for motor_id, params in self.pid_config_cache.items():
-                        pid_command_str = f"MOTOR:{motor_id} Kp:{params['kp']} Ki:{params['ki']} Kd:{params['kd']}\n"
+                for motor_id, params in self.pid_config_cache.items():
+                    pid_command_str = f"MOTOR:{motor_id} Kp:{params['kp']} Ki:{params['ki']} Kd:{params['kd']}\n"
+                    try:
                         writer.write(pid_command_str.encode('utf-8'))
                         await writer.drain()
                         log_tcp.debug(f"Sent cached PID to {current_alias}: {pid_command_str.strip()}")
-                        await asyncio.sleep(0.05) # Small delay
-                    log_tcp.info(f"Sent cached PID config to {current_alias} ({robot_ip_address}).")
-                else:
-                    log_tcp.info(f"PID cache for {current_alias} is empty, not sending.")
+                    except Exception as e:
+                        logger.error(f"Failed to send PID line to {current_alias}: {e}")
+                        break
+                log_tcp.info(f"Completed PID config send to {current_alias} ({robot_ip_address}).")
             except Exception as e:
                 logger.error(f"Error sending cached PID config to {current_alias} ({robot_ip_address}): {e}")
         else:
-            logger.info(f"No cached PID configuration to send to {current_alias} ({robot_ip_address}).")
+            if not send_pid_on_connect:
+                log_tcp.info(f"Skipping sending cached PID to {current_alias} due to BRIDGE_SEND_PID_ON_CONNECT=0")
+            else:
+                logger.info(f"No cached PID configuration to send to {current_alias} ({robot_ip_address}).")
             
         robot_announced_to_ui = False
         # Announce new/re-established robot to UI clients
@@ -1380,6 +1423,23 @@ class DirectBridge:
                                 await self.broadcast_to_subscribers(current_alias, trajectory_message_for_ws)
                                 robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
                                 await self.broadcast_to_subscribers(current_alias, robot_status_payload)
+                                # Optionally broadcast compact robot_status to all connected UI clients so
+                                # unselected robots can still be visualized in summaries or lists.
+                                if os.environ.get("BRIDGE_BROADCAST_ALL_STATUS", "0").strip() in ("1", "true", "yes"):
+                                    try:
+                                        await broadcast_to_all_ui(robot_status_payload)
+                                    except Exception:
+                                        pass
+                            # Optionally broadcast raw encoder data to all UI clients (throttled)
+                            if os.environ.get("BRIDGE_BROADCAST_ALL_TYPES", "0").strip() in ("1", "true", "yes"):
+                                try:
+                                    now_t = time.time()
+                                    last_t = self._last_broadcast_time_by_robot.get(unique_robot_key, 0.0)
+                                    if (now_t - last_t) >= float(os.environ.get("BRIDGE_BROADCAST_MIN_INTERVAL", "0.2")):
+                                        await broadcast_to_all_ui(transformed_message)
+                                        self._last_broadcast_time_by_robot[unique_robot_key] = now_t
+                                except Exception:
+                                    pass
                             else:
                                 # First encoder after connect initializes timestamp and returns None.
                                 # Send a snapshot to let UI render immediately.
@@ -1397,6 +1457,11 @@ class DirectBridge:
                                     # Also provide status
                                     robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
                                     await self.broadcast_to_subscribers(current_alias, robot_status_payload)
+                                    if os.environ.get("BRIDGE_BROADCAST_ALL_STATUS", "0").strip() in ("1", "true", "yes"):
+                                        try:
+                                            await broadcast_to_all_ui(robot_status_payload)
+                                        except Exception:
+                                            pass
                                 else:
                                     logger.warning(f"Skipping trajectory broadcast for {current_alias} due to invalid result from TrajectoryCalculator: {trajectory_update_result}")
                     
@@ -1427,6 +1492,21 @@ class DirectBridge:
                         # Always push robot_status on IMU update
                         robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
                         await self.broadcast_to_subscribers(current_alias, robot_status_payload)
+                        if os.environ.get("BRIDGE_BROADCAST_ALL_STATUS", "0").strip() in ("1", "true", "yes"):
+                            try:
+                                await broadcast_to_all_ui(robot_status_payload)
+                            except Exception:
+                                pass
+                        # Optionally broadcast IMU packets to all UI clients (throttled)
+                        if os.environ.get("BRIDGE_BROADCAST_ALL_TYPES", "0").strip() in ("1", "true", "yes"):
+                            try:
+                                now_t = time.time()
+                                last_t = self._last_broadcast_time_by_robot.get(unique_robot_key, 0.0)
+                                if (now_t - last_t) >= float(os.environ.get("BRIDGE_BROADCAST_MIN_INTERVAL", "0.2")):
+                                    await broadcast_to_all_ui(transformed_message)
+                                    self._last_broadcast_time_by_robot[unique_robot_key] = now_t
+                            except Exception:
+                                pass
 
                     elif msg_type == "position_update":
                         # transformed_message for position_update is:
@@ -1443,6 +1523,21 @@ class DirectBridge:
                             # transformed_message was already broadcast above; just update and broadcast status
                             robot_status_payload = self.build_robot_status_snapshot(unique_robot_key, current_alias, robot_ip_address)
                             await self.broadcast_to_subscribers(current_alias, robot_status_payload)
+                            if os.environ.get("BRIDGE_BROADCAST_ALL_STATUS", "0").strip() in ("1", "true", "yes"):
+                                try:
+                                    await broadcast_to_all_ui(robot_status_payload)
+                                except Exception:
+                                    pass
+                            # Optionally broadcast position packets to all UI clients (throttled)
+                            if os.environ.get("BRIDGE_BROADCAST_ALL_TYPES", "0").strip() in ("1", "true", "yes"):
+                                try:
+                                    now_t = time.time()
+                                    last_t = self._last_broadcast_time_by_robot.get(unique_robot_key, 0.0)
+                                    if (now_t - last_t) >= float(os.environ.get("BRIDGE_BROADCAST_MIN_INTERVAL", "0.2")):
+                                        await broadcast_to_all_ui(transformed_message)
+                                        self._last_broadcast_time_by_robot[unique_robot_key] = now_t
+                                except Exception:
+                                    pass
                     elif msg_type == "log":
                         # Persist logs (if robot sends textual logs)
                         if getattr(self, "db", None):

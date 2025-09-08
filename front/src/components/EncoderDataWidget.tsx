@@ -43,7 +43,7 @@ interface EncoderData {
 }
 
 const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
-  const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
+  const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState, getIncomingForRobot } = useRobotContext() as any;
   
   const [encoderData, setEncoderData] = useState<EncoderData>({
     rpm_1: 0,
@@ -128,33 +128,56 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
   }, [processMessageBuffer, isPaused]); // Added isPaused
 
   useEffect(() => {
-    if (lastJsonMessage && selectedRobotId) {
+    // Primary path: if an incoming live message for the selected robot arrives, use it
+    if (lastJsonMessage) {
       const message = lastJsonMessage as any;
-      if (message.robot_alias === selectedRobotId && message.type === 'encoder_data') {
-        const rpmList = message.data as number[]; 
-
+      if (selectedRobotId && message.robot_alias === selectedRobotId && message.type === 'encoder_data') {
+        const rpmList = message.data as number[];
         if (rpmList && Array.isArray(rpmList) && rpmList.length >= 3) {
           const newEncoderEntry: EncoderData = {
-            rpm_1: rpmList[0] ?? 0, 
-            rpm_2: rpmList[1] ?? 0, 
-            rpm_3: rpmList[2] ?? 0, 
+            rpm_1: rpmList[0] ?? 0,
+            rpm_2: rpmList[1] ?? 0,
+            rpm_3: rpmList[2] ?? 0,
             timestamp: message.timestamp || Date.now() / 1000,
-            robot_ip: message.robot_ip, 
+            robot_ip: message.robot_ip,
             robot_alias: message.robot_alias
           };
-          
           if (liveUpdate) {
-              messageBuffer.current.push(newEncoderEntry);
-              scheduleUIUpdate(); 
-              setWidgetError(null); 
+            messageBuffer.current.push(newEncoderEntry);
+            scheduleUIUpdate();
+            setWidgetError(null);
           }
-        } else {
-          // console.warn("EncoderDataWidget: Received encoder_data but RPM data is missing, not an array, or not enough values:", message);
-          // setWidgetError("Invalid RPM data received from robot."); // Keep this commented unless sure it's not flooding
         }
       }
     }
-  }, [lastJsonMessage, selectedRobotId, liveUpdate, scheduleUIUpdate]); // Dependencies for message handling
+
+    // Secondary path: when subscribing to a robot (or when selection changes), pre-fill buffer with stored messages
+    try {
+      if (selectedRobotId && getIncomingForRobot) {
+        const stored = getIncomingForRobot(selectedRobotId);
+        if (stored && Array.isArray(stored.encoder) && stored.encoder.length > 0) {
+          // Push last few stored messages into the buffer so the widget picks them up
+          const recent = stored.encoder.slice(-Math.min(100, stored.encoder.length));
+          recent.forEach((m: any) => {
+            const rpmList = m.data as number[];
+            if (rpmList && rpmList.length >= 3) {
+              messageBuffer.current.push({
+                rpm_1: rpmList[0] ?? 0,
+                rpm_2: rpmList[1] ?? 0,
+                rpm_3: rpmList[2] ?? 0,
+                timestamp: m.timestamp || Date.now() / 1000,
+                robot_ip: m.robot_ip || selectedRobotId,
+                robot_alias: selectedRobotId,
+              } as EncoderData);
+            }
+          });
+          scheduleUIUpdate();
+        }
+      }
+    } catch (e) {
+      // non-fatal
+    }
+  }, [lastJsonMessage, selectedRobotId, liveUpdate, scheduleUIUpdate, getIncomingForRobot]); // Dependencies for message handling
 
   useEffect(() => {
     const shouldBeSubscribed = liveUpdate && !!selectedRobotId && readyState === ReadyState.OPEN;

@@ -25,6 +25,9 @@ interface RobotContextType {
   addPinnedRobot: (alias: string) => void;
   removePinnedRobot: (alias: string) => void;
   clearPinnedRobots: () => void;
+  // New API to access recorded incoming messages per robot
+  incomingByRobot?: Record<string, any>;
+  getIncomingForRobot?: (alias: string) => any | null;
 }
 
 const RobotContext = createContext<RobotContextType>({
@@ -153,7 +156,39 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
         }
       }
     }
+    // Also store incoming messages per-robot so UI widgets can keep history for non-selected robots
+    if (lastJsonMessage) {
+      try {
+        const inc = lastJsonMessage as any;
+        const typ = inc.type;
+        const robotAliasForIncoming = inc.robot_alias || inc.robot_ip || inc.original_id_field || inc.robot_id || (inc.robot && inc.robot.alias);
+        if (robotAliasForIncoming && typ && ["encoder_data", "imu_data", "position_update", "log", "robot_status"].includes(typ)) {
+          setIncomingByRobot(prev => {
+            const copy: any = { ...(prev || {}) };
+            if (!copy[robotAliasForIncoming]) copy[robotAliasForIncoming] = { encoder: [], imu: [], position: [], log: [], status: null };
+            const bucket = copy[robotAliasForIncoming];
+            if (typ === "encoder_data") {
+              bucket.encoder = [...bucket.encoder, inc].slice(-500);
+            } else if (typ === "imu_data") {
+              bucket.imu = [...bucket.imu, inc].slice(-500);
+            } else if (typ === "position_update") {
+              bucket.position = [...bucket.position, inc].slice(-500);
+            } else if (typ === "log") {
+              bucket.log = [...bucket.log, inc].slice(-500);
+            } else if (typ === "robot_status") {
+              bucket.status = inc;
+            }
+            return copy;
+          });
+        }
+      } catch (e) {
+        console.warn('RobotContext: failed to store incoming message per-robot', e);
+      }
+    }
   }, [lastJsonMessage, selectedRobotId]);
+
+  // Maintain incoming message store per-robot
+  const [incomingByRobot, setIncomingByRobot] = useState<Record<string, any>>({});
 
   const setSelectedRobotId = useCallback((alias: string | null) => {
     console.log("[RobotContext] setSelectedRobotId called with:", alias, "| Current:", selectedRobotId);
@@ -200,13 +235,16 @@ export const RobotProvider: React.FC<{children: ReactNode}> = ({ children }) => 
         setSelectedRobotId,
         connectedRobots, 
         sendJsonMessage,
-        lastJsonMessage, 
+  lastJsonMessage,
         readyState,
         requestRobotListUpdate,
         pinnedRobotAliases,
         addPinnedRobot,
         removePinnedRobot,
         clearPinnedRobots,
+  // Expose incomingByRobot so widgets can access recorded messages for any robot
+  incomingByRobot,
+  getIncomingForRobot: (alias: string) => (incomingByRobot && incomingByRobot[alias]) ? incomingByRobot[alias] : null,
       }}
     >
       {children}
