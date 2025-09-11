@@ -22,3 +22,4 @@ Omni_Server/
 _pycache_/
 
 *.txt
+*.db

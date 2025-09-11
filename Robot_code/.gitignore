@@ -1,7 +1,0 @@
-**/build/
-DOANOMNI/Omni_Server/__pycache__/
-DOANOMNI/Omni_Server/*.txt
-Omni_Server/logs/
-Omni_Server/kinematics_logs/
-DOANOMNI/Omni/OTA1_Omni/.vscode
-DOANOMNI/Omni/OTA0_FirmwareUpdate/.vscode

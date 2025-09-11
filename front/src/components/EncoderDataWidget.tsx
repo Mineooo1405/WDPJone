@@ -15,6 +15,7 @@ import {
   Legend
 } from 'chart.js';
 import zoomPlugin from 'chartjs-plugin-zoom';
+import { appConfig } from '../config/appConfig';
 
 // Register Chart.js components
 ChartJS.register(
@@ -29,14 +30,15 @@ ChartJS.register(
 );
 
 // Modify these constants for faster updates
-const MAX_HISTORY_POINTS = 100; // Increased for better visualization, adjust as needed
-const UI_UPDATE_INTERVAL = 50; // milliseconds, adjust for balance between responsiveness and performance
+const MAX_HISTORY_POINTS = appConfig.encoder.maxHistoryPoints;
+const UI_UPDATE_INTERVAL = appConfig.encoder.uiUpdateIntervalMs;
 
 // Re-define EncoderData interface
 interface EncoderData {
   rpm_1: number;
   rpm_2: number;
   rpm_3: number;
+  rpm_4?: number; // Optional for mecanum robots
   timestamp: number; // Consistently use number for timestamp (epoch seconds or ms)
   robot_ip: string;
   robot_alias: string; // Added for clarity, though filtering will use this
@@ -49,6 +51,7 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
     rpm_1: 0,
     rpm_2: 0,
     rpm_3: 0,
+  rpm_4: undefined,
     timestamp: Date.now() / 1000,
     robot_ip: '',
     robot_alias: ''
@@ -59,6 +62,7 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
     encoder1: number[];
     encoder2: number[];
     encoder3: number[];
+    encoder4?: number[]; // Optional 4th channel
   }>({ timestamps: [], encoder1: [], encoder2: [], encoder3: [] });
   
   const [liveUpdate, setLiveUpdate] = useState(true);
@@ -98,12 +102,18 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
             const newEncoder1 = newMessages.map(msg => msg.rpm_1);
             const newEncoder2 = newMessages.map(msg => msg.rpm_2);
             const newEncoder3 = newMessages.map(msg => msg.rpm_3);
-          return {
+            const anyFour = newMessages.some(m => typeof m.rpm_4 === 'number');
+            const newEncoder4 = anyFour ? newMessages.map(msg => (typeof msg.rpm_4 === 'number' ? (msg.rpm_4 as number) : NaN)) : [];
+            const next: typeof prev = {
               timestamps: [...prev.timestamps, ...newTimestamps].slice(-MAX_HISTORY_POINTS),
               encoder1: [...prev.encoder1, ...newEncoder1].slice(-MAX_HISTORY_POINTS),
               encoder2: [...prev.encoder2, ...newEncoder2].slice(-MAX_HISTORY_POINTS),
-              encoder3: [...prev.encoder3, ...newEncoder3].slice(-MAX_HISTORY_POINTS)
-          };
+              encoder3: [...prev.encoder3, ...newEncoder3].slice(-MAX_HISTORY_POINTS),
+              encoder4: (prev.encoder4 || anyFour)
+                ? ([...(prev.encoder4 || []), ...newEncoder4].slice(-MAX_HISTORY_POINTS))
+                : undefined
+            };
+            return next;
         });
       //} // Removed closing bracket
     }
@@ -138,6 +148,7 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
             rpm_1: rpmList[0] ?? 0,
             rpm_2: rpmList[1] ?? 0,
             rpm_3: rpmList[2] ?? 0,
+            rpm_4: rpmList.length >= 4 ? (rpmList[3] ?? 0) : undefined,
             timestamp: message.timestamp || Date.now() / 1000,
             robot_ip: message.robot_ip,
             robot_alias: message.robot_alias
@@ -157,14 +168,15 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
         const stored = getIncomingForRobot(selectedRobotId);
         if (stored && Array.isArray(stored.encoder) && stored.encoder.length > 0) {
           // Push last few stored messages into the buffer so the widget picks them up
-          const recent = stored.encoder.slice(-Math.min(100, stored.encoder.length));
+      const recent = stored.encoder.slice(-Math.min(100, stored.encoder.length));
           recent.forEach((m: any) => {
             const rpmList = m.data as number[];
             if (rpmList && rpmList.length >= 3) {
               messageBuffer.current.push({
                 rpm_1: rpmList[0] ?? 0,
                 rpm_2: rpmList[1] ?? 0,
-                rpm_3: rpmList[2] ?? 0,
+        rpm_3: rpmList[2] ?? 0,
+        rpm_4: rpmList.length >= 4 ? (rpmList[3] ?? 0) : undefined,
                 timestamp: m.timestamp || Date.now() / 1000,
                 robot_ip: m.robot_ip || selectedRobotId,
                 robot_alias: selectedRobotId,
@@ -192,8 +204,8 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
         robot_alias: selectedRobotId
       });
       subscribedRobotId.current = selectedRobotId;
-      setEncoderHistory({ timestamps: [], encoder1: [], encoder2: [], encoder3: [] });
-      setEncoderData({ rpm_1: 0, rpm_2: 0, rpm_3: 0, timestamp: Date.now() / 1000, robot_ip: '', robot_alias: '' });
+  setEncoderHistory({ timestamps: [], encoder1: [], encoder2: [], encoder3: [], encoder4: [] });
+  setEncoderData({ rpm_1: 0, rpm_2: 0, rpm_3: 0, rpm_4: undefined, timestamp: Date.now() / 1000, robot_ip: '', robot_alias: '' });
       messageBuffer.current = [];
       setWidgetError(null);
     }
@@ -242,8 +254,8 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
       // The useEffect above will handle the actual subscription if conditions are met
       // (selectedRobotId is present, readyState is OPEN)
       // We can clear data here if desired when (re)starting live updates
-      setEncoderHistory({ timestamps: [], encoder1: [], encoder2: [], encoder3: [] });
-      setEncoderData({ rpm_1: 0, rpm_2: 0, rpm_3: 0, timestamp: Date.now() / 1000, robot_ip: '', robot_alias: '' });
+  setEncoderHistory({ timestamps: [], encoder1: [], encoder2: [], encoder3: [], encoder4: [] });
+  setEncoderData({ rpm_1: 0, rpm_2: 0, rpm_3: 0, rpm_4: undefined, timestamp: Date.now() / 1000, robot_ip: '', robot_alias: '' });
       messageBuffer.current = [];
       // The useEffect will now see liveUpdate as true and should subscribe
     } else {
@@ -270,9 +282,9 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
   }, []);
 
   const clearHistory = () => {
-    setEncoderHistory({ timestamps: [], encoder1: [], encoder2: [], encoder3: [] });
+  setEncoderHistory({ timestamps: [], encoder1: [], encoder2: [], encoder3: [], encoder4: [] });
     messageBuffer.current = [];
-    setEncoderData({ rpm_1: 0, rpm_2: 0, rpm_3: 0, timestamp: Date.now() / 1000, robot_ip: '', robot_alias: '' });
+  setEncoderData({ rpm_1: 0, rpm_2: 0, rpm_3: 0, rpm_4: undefined, timestamp: Date.now() / 1000, robot_ip: '', robot_alias: '' });
     if (chartRef.current) {
       chartRef.current.resetZoom();
     }
@@ -284,10 +296,12 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
       return;
     }
     setWidgetError(null);
-    const csvHeader = "Timestamp,RPM1,RPM2,RPM3\\n";
-    const csvRows = encoderHistory.timestamps.map((ts, idx) => 
-      `${ts},${encoderHistory.encoder1[idx]},${encoderHistory.encoder2[idx]},${encoderHistory.encoder3[idx]}`
-    ).join("\\n");
+    const hasFour = !!encoderHistory.encoder4 && encoderHistory.encoder4.length > 0 && encoderHistory.encoder4.some(v => typeof v === 'number');
+    const csvHeader = hasFour ? "Timestamp,RPM1,RPM2,RPM3,RPM4\\n" : "Timestamp,RPM1,RPM2,RPM3\\n";
+    const csvRows = encoderHistory.timestamps.map((ts, idx) => {
+      const base = `${ts},${encoderHistory.encoder1[idx]},${encoderHistory.encoder2[idx]},${encoderHistory.encoder3[idx]}`;
+      return hasFour ? `${base},${encoderHistory.encoder4?.[idx] ?? ''}` : base;
+    }).join("\\n");
     const csvContent = csvHeader + csvRows;
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -323,6 +337,7 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
     derivedStatusText = "Connected (Idle)";
   }
 
+  const hasFourForChart = !!encoderHistory.encoder4 && encoderHistory.encoder4.length > 0 && encoderHistory.encoder4.some(v => typeof v === 'number');
   const chartData = {
     labels: encoderHistory.timestamps,
     datasets: [
@@ -349,7 +364,15 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
         backgroundColor: 'rgba(54, 162, 235, 0.5)',
         tension: 0.1,
         pointRadius: 2,
-      }
+      },
+      ...(hasFourForChart ? [{
+        label: 'Encoder 4 RPM',
+        data: encoderHistory.encoder4 as number[],
+        borderColor: 'rgb(255, 206, 86)',
+        backgroundColor: 'rgba(255, 206, 86, 0.5)',
+        tension: 0.1,
+        pointRadius: 2,
+      }] : [])
     ]
   };
 
@@ -452,10 +475,12 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-3 mb-4">
-        {[encoderData.rpm_1, encoderData.rpm_2, encoderData.rpm_3].map((rpm, idx) => (
+      <div className={`grid ${encoderData.rpm_4 !== undefined ? 'grid-cols-4' : 'grid-cols-3'} gap-3 mb-4`}>
+        {([encoderData.rpm_1, encoderData.rpm_2, encoderData.rpm_3].concat(
+          encoderData.rpm_4 !== undefined ? [encoderData.rpm_4] : []
+        )).map((rpm, idx) => (
           <div key={idx} className={`p-3 rounded-lg text-center shadow-md 
-            ${idx === 0 ? 'bg-blue-700' : idx === 1 ? 'bg-red-700' : 'bg-green-700'} text-white`}
+            ${idx === 0 ? 'bg-blue-700' : idx === 1 ? 'bg-red-700' : idx === 2 ? 'bg-green-700' : 'bg-yellow-700'} text-white`}
           >
             <div className="text-sm opacity-80 mb-1">Encoder {idx + 1}</div>
             <div className={`text-2xl font-bold`}>{rpm.toFixed(1)}</div>
@@ -473,7 +498,7 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
           <div className="h-full flex items-center justify-center text-gray-500 border border-dashed border-gray-700 rounded-md bg-gray-800/30">
             { readyState !== ReadyState.OPEN ? "WebSocket chưa kết nối.":
               !selectedRobotId ? "Vui lòng chọn một robot." :
-              !liveUpdate && encoderHistory.timestamps.length === 0 ? "Nhấn 'Start Live' trong header để xem dữ liệu." : // Updated text
+              !liveUpdate && encoderHistory.timestamps.length > 0 ? "Nhấn 'Start Live' trong header để xem dữ liệu." : // Updated text
               liveUpdate && subscribedRobotId.current !== selectedRobotId ? "Đang đăng ký nhận dữ liệu..." : // Added state
               liveUpdate && encoderHistory.timestamps.length === 0 ? "Đang chờ dữ liệu encoder..." :
               "Không có dữ liệu để hiển thị."

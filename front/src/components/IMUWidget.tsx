@@ -15,6 +15,7 @@ import {
   Legend
 } from 'chart.js';
 import zoomPlugin from 'chartjs-plugin-zoom';
+import { appConfig } from '../config/appConfig';
 
 // Register Chart.js components
 ChartJS.register(
@@ -29,8 +30,8 @@ ChartJS.register(
 );
 
 // Performance optimization constants
-const MAX_HISTORY_POINTS = 100;
-const UI_UPDATE_INTERVAL = 50; // Adjusted for consistency, IMU might send data fast
+const MAX_HISTORY_POINTS = appConfig.imu.maxHistoryPoints;
+const UI_UPDATE_INTERVAL = appConfig.imu.uiUpdateIntervalMs; // Adjusted for consistency, IMU might send data fast
 
 // Standardized IMU data structure expected from WebSocket
 interface ImuData {
@@ -224,7 +225,7 @@ const SimpleYPRVisualizer: React.FC<{ roll: number; pitch: number; yaw: number }
 };
 
 const IMUWidget: React.FC = () => {
-  const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
+  const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState, getIncomingForRobot } = useRobotContext() as any;
 
   const [currentImuData, setCurrentImuData] = useState<ImuData | null>(null);
   const [widgetError, setWidgetError] = useState<string | null>(null);
@@ -319,21 +320,23 @@ const IMUWidget: React.FC = () => {
         const imuPayload = message.data; // This is the object with euler, quaternion, etc.
 
         // Create a new ImuData object by extracting values from imuPayload
+        const eulerArr = Array.isArray(imuPayload.euler) ? imuPayload.euler : [];
+        // Prefer [yaw, pitch, roll] ordering (sim + backend yaw index default), fallback gracefully
+        const yawVal = typeof eulerArr[0] === 'number' ? eulerArr[0] : (typeof eulerArr[2] === 'number' ? eulerArr[2] : 0);
+        const pitchVal = typeof eulerArr[1] === 'number' ? eulerArr[1] : 0;
+        const rollVal = typeof eulerArr[2] === 'number' ? eulerArr[2] : (typeof eulerArr[0] === 'number' ? eulerArr[0] : 0);
+        const quatArr = Array.isArray(imuPayload.quaternion) ? imuPayload.quaternion : [];
         const newImuEntry: ImuData = {
-          roll: imuPayload.euler?.[0],
-          pitch: imuPayload.euler?.[1],
-          yaw: imuPayload.euler?.[2],
-          
-          quat_w: imuPayload.quaternion?.[0],
-          quat_x: imuPayload.quaternion?.[1],
-          quat_y: imuPayload.quaternion?.[2],
-          quat_z: imuPayload.quaternion?.[3],
-          
+          roll: rollVal,
+          pitch: pitchVal,
+          yaw: yawVal,
+          quat_w: typeof quatArr[0] === 'number' ? quatArr[0] : 1.0,
+          quat_x: typeof quatArr[1] === 'number' ? quatArr[1] : 0.0,
+          quat_y: typeof quatArr[2] === 'number' ? quatArr[2] : 0.0,
+          quat_z: typeof quatArr[3] === 'number' ? quatArr[3] : 0.0,
           timestamp: message.timestamp || Date.now() / 1000, // Timestamp from the outer message
           robot_ip: message.robot_ip, 
           robot_alias: message.robot_alias,
-          // If 'calibrated' status comes with imu_data from backend, handle it here
-          // For now, assuming 'bno_event' handles calibration status separately
           calibrated: currentImuData?.calibrated ?? false 
         };
 
@@ -361,6 +364,40 @@ const IMUWidget: React.FC = () => {
       }
     }
   }, [lastJsonMessage, selectedRobotId, currentImuData, scheduleUIUpdate]);
+
+  // Prefill from buffered IMU messages when selecting a robot
+  useEffect(() => {
+    try {
+      if (selectedRobotId && getIncomingForRobot) {
+        const stored = getIncomingForRobot(selectedRobotId);
+        if (stored && Array.isArray(stored.imu) && stored.imu.length > 0) {
+          const recent = stored.imu.slice(-Math.min(100, stored.imu.length));
+          recent.forEach((m: any) => {
+            const imuPayload = m.data || {};
+            const eulerArr = Array.isArray(imuPayload.euler) ? imuPayload.euler : [];
+            const yawVal = typeof eulerArr[0] === 'number' ? eulerArr[0] : (typeof eulerArr[2] === 'number' ? eulerArr[2] : 0);
+            const pitchVal = typeof eulerArr[1] === 'number' ? eulerArr[1] : 0;
+            const rollVal = typeof eulerArr[2] === 'number' ? eulerArr[2] : (typeof eulerArr[0] === 'number' ? eulerArr[0] : 0);
+            const quatArr = Array.isArray(imuPayload.quaternion) ? imuPayload.quaternion : [];
+            messageBuffer.current.push({
+              roll: rollVal,
+              pitch: pitchVal,
+              yaw: yawVal,
+              quat_w: typeof quatArr[0] === 'number' ? quatArr[0] : 1.0,
+              quat_x: typeof quatArr[1] === 'number' ? quatArr[1] : 0.0,
+              quat_y: typeof quatArr[2] === 'number' ? quatArr[2] : 0.0,
+              quat_z: typeof quatArr[3] === 'number' ? quatArr[3] : 0.0,
+              timestamp: m.timestamp || Date.now() / 1000,
+              robot_ip: m.robot_ip || selectedRobotId,
+              robot_alias: selectedRobotId,
+              calibrated: false,
+            } as ImuData);
+          });
+          scheduleUIUpdate();
+        }
+      }
+    } catch {}
+  }, [selectedRobotId, getIncomingForRobot, scheduleUIUpdate]);
 
   // Effect for subscribing and unsubscribing to IMU data (always live when connected)
   useEffect(() => {

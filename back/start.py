@@ -147,7 +147,7 @@ class AppGUI:
             try:
                 script_file_path = Path(__file__)
                 project_root_dir = script_file_path.resolve().parent.parent
-                cmd = f"{sys.executable} Robot_code/Omni/sim_robot.py --ui"
+                cmd = f"{sys.executable} Robot_code/Omni/Omni/sim_robot.py --ui"
                 proc = run_command_gui(cmd, cwd=project_root_dir)
                 if proc.stdout is None or proc.stderr is None:
                     output_queue.put(("System-ERR", "Failed to get stdout/stderr for simulator process."))

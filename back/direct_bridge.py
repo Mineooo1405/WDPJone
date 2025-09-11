@@ -122,8 +122,15 @@ class TrajectoryCalculator:
         yaw = None
         if "yaw" in imu_data:
             yaw = imu_data["yaw"]
-        elif "euler" in imu_data and len(imu_data["euler"]) == 3:
-            yaw = imu_data["euler"][2]
+        elif "euler" in imu_data and isinstance(imu_data.get("euler"), list) and len(imu_data["euler"]) == 3:
+            # Many firmwares (e.g., BNO055) send Euler as [heading(yaw), pitch, roll]
+            # Make this configurable via IMU_EULER_YAW_INDEX (default 0)
+            try:
+                yaw_index = int(os.environ.get("IMU_EULER_YAW_INDEX", "0"))
+            except Exception:
+                yaw_index = 0
+            yaw_index = 0 if yaw_index not in (0, 1, 2) else yaw_index
+            yaw = imu_data["euler"][yaw_index]
         robot_state = self.robot_data[unique_robot_key]
         if yaw is not None:
             robot_state["theta"] = yaw
@@ -223,14 +230,47 @@ class TrajectoryCalculator:
             # Convert to rad/s
             w1, w2, w3, w4 = [self._rpm_to_omega(rpm) for rpm in rpms[:4]]
             r = float(os.environ.get("WHEEL_RADIUS", WHEEL_RADIUS_DEFAULT))
-            lx = float(os.environ.get("MECANUM_LX", MECANUM_LX_DEFAULT))
-            ly = float(os.environ.get("MECANUM_LY", MECANUM_LY_DEFAULT))
-            Lsum = (lx + ly) if (lx + ly) != 0 else 1e-6
-            # Standard mecanum forward kinematics (wheel order assumed: FL, FR, RL, RR)
-            # Note: depending on roller orientation, the signs for vy/omega rows might need flipping.
+            # Determine geometry for omega calculation (Lsum = lx + ly)
+            Lsum_env = os.environ.get("MECANUM_LSUM")
+            if Lsum_env is not None:
+                try:
+                    Lsum = float(Lsum_env)
+                except Exception:
+                    Lsum = MECANUM_LX_DEFAULT + MECANUM_LY_DEFAULT
+            else:
+                try:
+                    lx = float(os.environ.get("MECANUM_LX", MECANUM_LX_DEFAULT))
+                    ly = float(os.environ.get("MECANUM_LY", MECANUM_LY_DEFAULT))
+                    Lsum = lx + ly
+                except Exception:
+                    Lsum = MECANUM_LX_DEFAULT + MECANUM_LY_DEFAULT
+                # If ROBOT_RADIUS provided and lx/ly not explicitly set, prefer Lsum = 2*ROBOT_RADIUS
+                try:
+                    if os.environ.get("MECANUM_LX") is None and os.environ.get("MECANUM_LY") is None:
+                        robot_radius = float(os.environ.get("ROBOT_RADIUS", "nan"))
+                        if robot_radius == robot_radius:  # not NaN
+                            Lsum = 2.0 * robot_radius
+                except Exception:
+                    pass
+            if Lsum == 0:
+                Lsum = 1e-6
+
+            # Standard mecanum forward kinematics (wheel order: FL, FR, RL, RR)
             vx_robot = (r / 4.0) * (w1 + w2 + w3 + w4)
             vy_robot = (r / 4.0) * (-w1 + w2 + w3 - w4)
             omega_body = (r / (4.0 * Lsum)) * (-w1 + w2 - w3 + w4)
+
+            # Optional sign adjustments from env to match roller orientation/wiring
+            try:
+                vy_sign = float(os.environ.get("MECANUM_VY_SIGN", "1.0"))
+            except Exception:
+                vy_sign = 1.0
+            try:
+                omega_sign = float(os.environ.get("MECANUM_OMEGA_SIGN", "1.0"))
+            except Exception:
+                omega_sign = 1.0
+            vy_robot *= vy_sign
+            omega_body *= omega_sign
         else:
             # 3-wheel omni (legacy): simple average forward velocity, no lateral velocity modeled
             omega_m1, omega_m2, omega_m3 = [self._rpm_to_omega(rpm) for rpm in rpms[:3]]
@@ -2205,97 +2245,131 @@ class DirectBridge:
 
 def transform_robot_message(message_dict: dict) -> dict:
     """
-    Transforms incoming robot messages (already parsed as dict) to a standardized format
-    for the frontend.
-    The robot_ip and robot_alias fields will be correctly populated by the caller (handle_tcp_client).
+    Transform incoming robot JSON to a safe, consistent format for the frontend.
+    Goals:
+    - Never raise on missing/empty fields.
+    - Coerce values to expected shapes with sensible defaults.
+    - Preserve original payload under generic_* types when unknown.
+    The robot_ip and robot_alias fields are filled by the caller after transform.
     """
+    def _num(v, default=0.0):
+        try:
+            if v is None or (isinstance(v, str) and v.strip() == ""):
+                return float(default)
+            return float(v)
+        except Exception:
+            return float(default)
+
+    def _list_num(seq, n, default=0.0):
+        if not isinstance(seq, (list, tuple)):
+            return [float(default) for _ in range(n)]
+        out = []
+        for i in range(n):
+            out.append(_num(seq[i] if i < len(seq) else default, default))
+        return out
+
     transformed_payload = {
-        "robot_ip": "PENDING_IP", 
-        "robot_alias": "PENDING_ALIAS", 
-        "timestamp": message_dict.get("timestamp", time.time()) 
+        "robot_ip": "PENDING_IP",
+        "robot_alias": "PENDING_ALIAS",
+        "timestamp": message_dict.get("timestamp", time.time()),
     }
 
     original_type = message_dict.get("type")
     robot_reported_id = message_dict.get("id")
 
-    # 1. Identify IMU data (ESP32 sends type: "bno055")
-    if original_type == "bno055" and "data" in message_dict and isinstance(message_dict["data"], dict):
+    # 1) IMU data (ESP32 sends type: "bno055"). Be tolerant of missing/empty fields.
+    if original_type == "bno055":
         transformed_payload["type"] = "imu_data"
-        imu_data_content = message_dict["data"]
+        src = message_dict.get("data")
+        if not isinstance(src, dict):
+            src = {}
+        # Normalize euler and quaternion to fixed-length lists
+        euler = src.get("euler")
+        if isinstance(euler, (list, tuple)):
+            euler = _list_num(euler, 3, 0.0)
+        else:
+            # Accept alternative keys or fill defaults
+            euler = [_num(src.get("heading", 0.0)), _num(src.get("pitch", 0.0)), _num(src.get("roll", 0.0))]
+        quat = src.get("quaternion")
+        if isinstance(quat, (list, tuple)):
+            quat = _list_num(quat, 4, 0.0)
+        else:
+            quat = [_num(src.get("quat_w", 1.0), 1.0), _num(src.get("quat_x", 0.0)), _num(src.get("quat_y", 0.0)), _num(src.get("quat_z", 0.0))]
         transformed_payload["data"] = {
-            "time": imu_data_content.get("time"), 
-            "euler": imu_data_content.get("euler"),
-            "quaternion": imu_data_content.get("quaternion"),
+            "time": src.get("time", transformed_payload["timestamp"]),
+            "euler": euler,
+            "quaternion": quat,
         }
         if robot_reported_id:
-             transformed_payload["data"]["robot_reported_id"] = robot_reported_id
+            transformed_payload["data"]["robot_reported_id"] = robot_reported_id
 
-    # 2. Identify Encoder data (ESP32 sends type: "encoder") - MOVED UP FOR PRIORITY
-    elif original_type == "encoder" and "data" in message_dict and isinstance(message_dict.get("data"), list):
+    # 2) Encoder data (ESP32 sends type: "encoder"). Accept missing/empty list.
+    elif original_type == "encoder":
         transformed_payload["type"] = "encoder_data"
-        transformed_payload["data"] = message_dict["data"] 
+        rpms = message_dict.get("data")
+        if not isinstance(rpms, list):
+            # Fallback: look for legacy keys rpm_1..rpm_4
+            rpms = [message_dict.get("rpm_1"), message_dict.get("rpm_2"), message_dict.get("rpm_3"), message_dict.get("rpm_4")]
+            rpms = [v for v in rpms if v is not None]
+        # Coerce numbers and keep as-is length (can be 0..N)
+        rpms_coerced = [ _num(v, 0.0) for v in rpms ] if isinstance(rpms, list) else []
+        transformed_payload["data"] = rpms_coerced
         if robot_reported_id:
-             transformed_payload["robot_reported_id"] = robot_reported_id
+            transformed_payload["robot_reported_id"] = robot_reported_id
 
-    # 3. Identify Position data (ESP32 sends type: "position")
-    elif original_type == "position" and "data" in message_dict and isinstance(message_dict["data"], dict):
-        # Expect firmware shape:
-        # {
-        #   "id":"<ID>",
-        #   "type":"position",
-        #   "data":{
-        #     "position":[x,y,thetaDeg],
-        #     "velocity":[vx,vy],
-        #     "acceleration":[ax,ay,az],
-        #     "vel_control":[vcx,vcy]
-        #   }
-        # }
+    # 3) Position data (ESP32 sends type: "position"). Allow empty/partial arrays.
+    elif original_type == "position":
         transformed_payload["type"] = "position_update"
-        pos_arr = message_dict["data"].get("position")
-        theta_rad = 0.0
-        x = 0.0
-        y = 0.0
-        if isinstance(pos_arr, list) and len(pos_arr) >= 3:
-            try:
-                x = float(pos_arr[0])
-                y = float(pos_arr[1])
-                theta_deg = float(pos_arr[2])
-                theta_rad = theta_deg * math.pi / 180.0
-            except Exception:
-                pass
+        src = message_dict.get("data")
+        if not isinstance(src, dict):
+            src = {}
+        pos_arr = src.get("position")
+        x, y, theta_rad = 0.0, 0.0, 0.0
+        if isinstance(pos_arr, (list, tuple)) and len(pos_arr) >= 3:
+            x = _num(pos_arr[0], 0.0)
+            y = _num(pos_arr[1], 0.0)
+            theta_deg = _num(pos_arr[2], 0.0)
+            theta_rad = theta_deg * math.pi / 180.0
         transformed_payload["data"] = {"x": x, "y": y, "theta": theta_rad}
         if robot_reported_id:
             transformed_payload["robot_reported_id"] = robot_reported_id
 
-    # 4. Identify Log data (ESP32 / test.py sends type: "log_data")
-    elif original_type == "log": # MODIFIED from "log" to "log_data"
-        transformed_payload["type"] = "log" # Keep the type as log_data for frontend
-        transformed_payload["message"] = message_dict.get("message")
-        transformed_payload["level"] = message_dict.get("level", "debug") # Default to "info" if not present
+    # 4) Log data (string message), tolerate missing message/level
+    elif original_type == "log":
+        transformed_payload["type"] = "log"
+        transformed_payload["message"] = message_dict.get("message", "")
+        transformed_payload["level"] = str(message_dict.get("level", "debug")).lower()
         if robot_reported_id:
-             transformed_payload["robot_reported_id"] = robot_reported_id
-    
-    # 5. Identify Registration message (Đã có từ trước, giữ nguyên)
+            transformed_payload["robot_reported_id"] = robot_reported_id
+
+    # 5) Registration handshake
     elif original_type == "registration" and "capabilities" in message_dict:
         transformed_payload["type"] = "registration"
         transformed_payload["data"] = {
             "capabilities": message_dict.get("capabilities"),
             "robot_reported_id": message_dict.get("robot_id") or robot_reported_id,
         }
-        if "robot_id" in message_dict: 
+        if "robot_id" in message_dict:
             transformed_payload["robot_reported_id_explicit"] = message_dict["robot_id"]
-        elif robot_reported_id and "robot_id" not in message_dict.get("data", {}): 
-             transformed_payload["robot_reported_id_explicit"] = robot_reported_id
-            
-    # 6. Handle other messages that have a 'type' field (generic passthrough) - THIS SHOULD BE CHECKED LATER
-    elif original_type: # This might catch specific types if not handled above explicitly
+        elif robot_reported_id and "robot_id" not in message_dict.get("data", {}):
+            transformed_payload["robot_reported_id_explicit"] = robot_reported_id
+
+    # 6) Generic passthrough if there's a type but not matched above
+    elif original_type:
         transformed_payload["type"] = f"generic_{original_type}"
-        transformed_payload["data"] = message_dict.copy() 
-    
-    # 7. Fallback for completely unknown structures
+        # Ensure we pass a shallow copy to avoid accidental mutation
+        try:
+            transformed_payload["data"] = message_dict.copy()
+        except Exception:
+            transformed_payload["data"] = {"raw": str(message_dict)}
+
+    # 7) Unknown without a type: classify and include raw
     else:
         transformed_payload["type"] = "unknown_json_data"
-        transformed_payload["data"] = message_dict.copy()
+        try:
+            transformed_payload["data"] = message_dict.copy()
+        except Exception:
+            transformed_payload["data"] = {"raw": str(message_dict)}
         logger.warning(f"Unknown JSON structure received (no type field), classifying as 'unknown_json_data': {message_dict}")
 
     return transformed_payload

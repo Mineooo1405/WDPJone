@@ -5,6 +5,7 @@ import { useRobotContext, ReadyState } from './RobotContext';
 import { GlobalAppContext } from '../contexts/GlobalAppContext'; 
 import { RotateCcw, Maximize } from 'lucide-react';
 import WidgetConnectionHeader from './WidgetConnectionHeader';
+import { appConfig } from '../config/appConfig';
 
 // Register Chart.js components
 ChartJS.register(
@@ -29,7 +30,7 @@ interface TrajectoryPoint {
 // Interface for the current pose of the robot
 interface RobotPose extends TrajectoryPoint {}
 
-const MAX_PATH_POINTS_DISPLAY = 500; // Max points to keep in the chart for performance
+const MAX_PATH_POINTS_DISPLAY = appConfig.trajectory.maxPathPointsDisplay; // Max points to keep in the chart for performance
 
 const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   const { selectedRobotId, setSelectedRobotId, connectedRobots, sendJsonMessage, lastJsonMessage, readyState } = useRobotContext();
@@ -104,12 +105,13 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     return { dash, pointStyle } as { dash: number[]; pointStyle: any };
   }, []);
 
-  // Effect to handle WebSocket messages for real-time trajectory updates (position-only, multi-robot) and navigation/map
+  // Effect to handle WebSocket messages for real-time trajectory updates (position-only),
+  // plus lightweight mecanum detection from encoder_data, navigation, and map
   useEffect(() => {
     if (lastJsonMessage) {
       try {
         const message = lastJsonMessage as any;
-        // Use only position_update from backend (authoritative pose from firmware)
+        // Position-only updates from firmware (authoritative)
         if (message.type === 'position_update' && message.robot_alias) {
           const alias = message.robot_alias as string;
           const position = message.position || message.data; // tolerate either shape
@@ -140,6 +142,16 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
           } else {
             console.warn('[TrajectoryWidget] Malformed position_update:', message);
           }
+        } else if (message.type === 'realtime_trajectory' && message.robot_alias) {
+          // Intentionally ignored: only position_update drives drawing per user request.
+        } else if (message.type === 'encoder_data' && message.robot_alias) {
+          // Type detection only: if 4+ encoders seen, render mecanum icon for this alias
+          const alias = message.robot_alias as string;
+          const rpms = Array.isArray(message.data) ? message.data : [];
+          if (appConfig.features.encoderTypeDetection && rpms.length >= 4 && robotTypesRef.current[alias] !== 'mecanum') {
+            robotTypesRef.current[alias] = 'mecanum';
+            chartRef.current?.update('none');
+          }
         } else if (message.type === 'planned_path' && message.robot_alias) {
           const alias = message.robot_alias as string;
           const points = Array.isArray(message.points) ? message.points.filter((p: any) => typeof p.x === 'number' && typeof p.y === 'number') : [];
@@ -161,30 +173,37 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     }
   }, [lastJsonMessage, widgetError]);
 
-  // Effect for subscribing to all connected robots (position_update + navigation topics) and unsubscribing when they disappear
+  // Effect for subscribing to all connected robots (position_update for drawing, encoder_data for type detection, navigation topics)
   useEffect(() => {
     if (readyState !== ReadyState.OPEN) return;
     const currentSubs = subscribedAliasesRef.current;
     const targetAliases = new Set((connectedRobots || []).map(r => r.alias));
 
-    // Unsubscribe removed
+  // Unsubscribe removed
     currentSubs.forEach(alias => {
       if (!targetAliases.has(alias)) {
         sendJsonMessage({ command: 'unsubscribe', type: 'position_update', robot_alias: alias });
         sendJsonMessage({ command: 'unsubscribe', type: 'planned_path', robot_alias: alias });
         sendJsonMessage({ command: 'unsubscribe', type: 'navigation_status', robot_alias: alias });
+        if (appConfig.features.encoderTypeDetection) {
+          sendJsonMessage({ command: 'unsubscribe', type: 'encoder_data', robot_alias: alias });
+        }
         currentSubs.delete(alias);
         setRobotPaths(prev => { const n = { ...prev }; delete n[alias]; return n; });
         setRobotPoses(prev => { const n = { ...prev }; delete n[alias]; robotPosesRef.current = n; return n; });
       }
     });
 
-    // Subscribe new
+  // Subscribe new
     targetAliases.forEach(alias => {
       if (!currentSubs.has(alias)) {
         sendJsonMessage({ command: 'subscribe', type: 'position_update', robot_alias: alias });
         sendJsonMessage({ command: 'subscribe', type: 'planned_path', robot_alias: alias });
         sendJsonMessage({ command: 'subscribe', type: 'navigation_status', robot_alias: alias });
+        // Subscribe to encoder_data solely for mecanum detection (4 channels)
+        if (appConfig.features.encoderTypeDetection) {
+          sendJsonMessage({ command: 'subscribe', type: 'encoder_data', robot_alias: alias });
+        }
         currentSubs.add(alias);
       }
     });
@@ -195,6 +214,9 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
         sendJsonMessage({ command: 'unsubscribe', type: 'position_update', robot_alias: alias });
         sendJsonMessage({ command: 'unsubscribe', type: 'planned_path', robot_alias: alias });
         sendJsonMessage({ command: 'unsubscribe', type: 'navigation_status', robot_alias: alias });
+        if (appConfig.features.encoderTypeDetection) {
+          sendJsonMessage({ command: 'unsubscribe', type: 'encoder_data', robot_alias: alias });
+        }
       });
       currentSubs.clear();
     };

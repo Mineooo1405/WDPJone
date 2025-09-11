@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useState, ReactNode, useEffect, useCallback } from "react";
 import useWebSocket, { ReadyState } from 'react-use-websocket';
+import { appConfig } from '../config/appConfig';
 
 // Define the WebSocket URL (align with start.py writes REACT_APP_WS_BRIDGE_URL)
-const WEBSOCKET_URL = process.env.REACT_APP_WS_BRIDGE_URL || 'ws://localhost:9003';
+const WEBSOCKET_URL = process.env.REACT_APP_WS_BRIDGE_URL || appConfig.wsUrl;
 
 // Define the structure for a robot entry
 export interface ConnectedRobot {
