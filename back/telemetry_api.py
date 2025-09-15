@@ -6,6 +6,15 @@ import datetime as dt
 
 from back.database import Database, Robot, PositionUpdate, EncoderValues, IMUBNO055, RobotLog
 
+# Ensure env files are loaded similarly to the bridge (optional)
+try:
+    from back.config import settings  # noqa: F401
+except Exception:
+    try:
+        from .config import settings  # noqa: F401
+    except Exception:
+        settings = None  # type: ignore
+
 app = FastAPI(title="Telemetry API")
 app.add_middleware(
     CORSMiddleware,

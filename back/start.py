@@ -306,9 +306,18 @@ def run_command_gui(command, cwd=None):
 
 def _parse_backend_env(backend_dir: Path):
     """Parse env_config.txt if present to override default ports."""
-    ws_port = DEFAULT_WS_BRIDGE_PORT
-    tcp_port = DIRECT_BRIDGE_TCP_PORT
-    ota_port = DIRECT_BRIDGE_OTA_PORT
+    # Try centralized config first
+    try:
+        from back.config import settings  # type: ignore
+        ws_port = settings.ws_bridge_port
+        tcp_port = settings.tcp_port
+        ota_port = settings.ota_port
+        api_port = DEFAULT_API_PORT
+    except Exception:
+        ws_port = DEFAULT_WS_BRIDGE_PORT
+        tcp_port = DIRECT_BRIDGE_TCP_PORT
+        ota_port = DIRECT_BRIDGE_OTA_PORT
+        api_port = DEFAULT_API_PORT
     api_port = DEFAULT_API_PORT
     try:
         env_file = backend_dir / "env_config.txt"

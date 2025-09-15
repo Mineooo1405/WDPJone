@@ -44,6 +44,17 @@ except Exception:
     # Non-fatal if unable to load extra env config
     pass
 
+# Centralized backend settings (fills os.environ defaults too)
+try:
+    # Prefer package-style import
+    from back.config import settings  # type: ignore
+except Exception:
+    try:
+        # Fallback for direct execution
+        from config import settings  # type: ignore
+    except Exception:
+        settings = None  # Optional; module will continue using os.environ fallbacks
+
 # --- Configuration from Environment Variables with Fallbacks ---
 TCP_PORT_DEFAULT = 12346
 WS_PORT_DEFAULT = 9003
@@ -1208,9 +1219,30 @@ class DirectBridge:
         )
         log_tcp.info(f"Control server started on 0.0.0.0:{self.tcp_port}")
         
-        ws_ping_interval = int(os.environ.get("WS_PING_INTERVAL", 30))
-        ws_ping_timeout = int(os.environ.get("WS_PING_TIMEOUT", 20))
-        ws_max_size = int(os.environ.get("WS_MAX_SIZE", 1*1024*1024))
+        # Cho phép giá trị float ("20.0") hoặc int cho ping interval/timeout
+        def _as_float_env(name: str, default: float) -> float:
+            raw = os.environ.get(name)
+            if raw is None or raw.strip() == "":
+                return default
+            try:
+                return float(raw)
+            except ValueError:
+                try:
+                    return float(int(raw))
+                except Exception:
+                    return default
+        def _as_int_env(name: str, default: int) -> int:
+            raw = os.environ.get(name)
+            if raw is None or raw.strip() == "":
+                return default
+            try:
+                return int(float(raw))
+            except Exception:
+                return default
+
+        ws_ping_interval = _as_float_env("WS_PING_INTERVAL", 30.0)
+        ws_ping_timeout = _as_float_env("WS_PING_TIMEOUT", 20.0)
+        ws_max_size = _as_int_env("WS_MAX_SIZE", 1*1024*1024)
         self.ws_server = await websockets.serve(
             self.handle_ws_client,
             '0.0.0.0',
