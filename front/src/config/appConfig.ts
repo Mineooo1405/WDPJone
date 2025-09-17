@@ -36,6 +36,19 @@ export const appConfig = {
     uiUpdateIntervalMs: toInt((import.meta as any).env?.REACT_APP_ENCODER_UI_INTERVAL_MS || (process as any).env?.REACT_APP_ENCODER_UI_INTERVAL_MS || 50, 50),
     // Số điểm lịch sử tối đa để vẽ biểu đồ
     maxHistoryPoints: toInt((import.meta as any).env?.REACT_APP_ENCODER_MAX_HISTORY || (process as any).env?.REACT_APP_ENCODER_MAX_HISTORY || 100, 100),
+    // Cấu hình adaptive rate: tự điều chỉnh tốc độ cập nhật UI dựa trên tốc độ gói đến
+    adaptive: {
+      enabled: String((import.meta as any).env?.REACT_APP_ENCODER_ADAPTIVE_ENABLED || (process as any).env?.REACT_APP_ENCODER_ADAPTIVE_ENABLED || '1') !== '0',
+      // Khoảng cách cập nhật nhỏ nhất và lớn nhất (ms)
+      minIntervalMs: toInt((import.meta as any).env?.REACT_APP_ENCODER_ADAPTIVE_MIN_INTERVAL_MS || (process as any).env?.REACT_APP_ENCODER_ADAPTIVE_MIN_INTERVAL_MS || 30, 30),
+      maxIntervalMs: toInt((import.meta as any).env?.REACT_APP_ENCODER_ADAPTIVE_MAX_INTERVAL_MS || (process as any).env?.REACT_APP_ENCODER_ADAPTIVE_MAX_INTERVAL_MS || 250, 250),
+      // Mục tiêu số điểm flush mỗi lần (batch size mong muốn)
+      targetBatch: toInt((import.meta as any).env?.REACT_APP_ENCODER_ADAPTIVE_TARGET_BATCH || (process as any).env?.REACT_APP_ENCODER_ADAPTIVE_TARGET_BATCH || 40, 40),
+      // Ngưỡng decimation: nếu batch > threshold sẽ lấy mẫu thưa lại
+      decimationThreshold: toInt((import.meta as any).env?.REACT_APP_ENCODER_DECIMATION_THRESHOLD || (process as any).env?.REACT_APP_ENCODER_DECIMATION_THRESHOLD || 400, 400),
+      // Số phần tử tối đa giữ trong messageBuffer (hard cap)
+      maxBuffer: toInt((import.meta as any).env?.REACT_APP_ENCODER_MAX_BUFFER || (process as any).env?.REACT_APP_ENCODER_MAX_BUFFER || 5000, 5000),
+    },
   },
 
   // Cấu hình cho IMU widget
@@ -44,6 +57,14 @@ export const appConfig = {
     uiUpdateIntervalMs: toInt((import.meta as any).env?.REACT_APP_IMU_UI_INTERVAL_MS || (process as any).env?.REACT_APP_IMU_UI_INTERVAL_MS || 50, 50),
     // Số điểm lịch sử tối đa để vẽ biểu đồ
     maxHistoryPoints: toInt((import.meta as any).env?.REACT_APP_IMU_MAX_HISTORY || (process as any).env?.REACT_APP_IMU_MAX_HISTORY || 100, 100),
+    adaptive: {
+      enabled: String((import.meta as any).env?.REACT_APP_IMU_ADAPTIVE_ENABLED || (process as any).env?.REACT_APP_IMU_ADAPTIVE_ENABLED || '1') !== '0',
+      minIntervalMs: toInt((import.meta as any).env?.REACT_APP_IMU_ADAPTIVE_MIN_INTERVAL_MS || (process as any).env?.REACT_APP_IMU_ADAPTIVE_MIN_INTERVAL_MS || 30, 30),
+      maxIntervalMs: toInt((import.meta as any).env?.REACT_APP_IMU_ADAPTIVE_MAX_INTERVAL_MS || (process as any).env?.REACT_APP_IMU_ADAPTIVE_MAX_INTERVAL_MS || 250, 250),
+      targetBatch: toInt((import.meta as any).env?.REACT_APP_IMU_ADAPTIVE_TARGET_BATCH || (process as any).env?.REACT_APP_IMU_ADAPTIVE_TARGET_BATCH || 40, 40),
+      decimationThreshold: toInt((import.meta as any).env?.REACT_APP_IMU_DECIMATION_THRESHOLD || (process as any).env?.REACT_APP_IMU_DECIMATION_THRESHOLD || 400, 400),
+      maxBuffer: toInt((import.meta as any).env?.REACT_APP_IMU_MAX_BUFFER || (process as any).env?.REACT_APP_IMU_MAX_BUFFER || 5000, 5000),
+    },
   },
 
   // Cấu hình cho Trajectory widget

@@ -31,9 +31,46 @@ ChartJS.register(
 
 // Performance optimization constants
 const MAX_HISTORY_POINTS = appConfig.imu.maxHistoryPoints;
-const UI_UPDATE_INTERVAL = appConfig.imu.uiUpdateIntervalMs; // Adjusted for consistency, IMU might send data fast
+const UI_UPDATE_INTERVAL = appConfig.imu.uiUpdateIntervalMs; // fallback legacy
+const ADAPT = appConfig.imu.adaptive;
 
-// Standardized IMU data structure expected from WebSocket
+// Tokens considered as NA in frontend layer (mirrors backend)
+const NA_TOKENS = new Set(["na","n/a","null","none","nan","n.a","--","missing","invalid",""]);
+
+// Frontend numeric sanitizer (guards in case legacy or out-of-band messages bypass backend transform)
+function safeNum(v: any, def = 0): number {
+  if (v === null || v === undefined) return def;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const trimmed = v.trim().toLowerCase();
+    if (NA_TOKENS.has(trimmed)) return def;
+    const normalized = trimmed.replace(/,/g,'.');
+    const parsed = parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : def;
+  }
+  return def;
+}
+
+function sanitizeEuler(arr: any): [number,number,number] {
+  if (!Array.isArray(arr)) return [0,0,0];
+  const a0 = safeNum(arr[0]);
+  const a1 = safeNum(arr[1]);
+  const a2 = safeNum(arr[2]);
+  // We keep ordering logic later (yaw index 0 typically) – here just numeric coercion
+  return [a0,a1,a2];
+}
+
+function sanitizeQuat(arr: any): [number,number,number,number] {
+  if (!Array.isArray(arr)) return [1,0,0,0];
+  return [
+    safeNum(arr[0],1),
+    safeNum(arr[1]),
+    safeNum(arr[2]),
+    safeNum(arr[3])
+  ];
+}
+
+// Standardized IMU data structure expected from WebSocket (reinserted after sanitization helpers)
 interface ImuData {
   roll: number;
   pitch: number;
@@ -43,8 +80,8 @@ interface ImuData {
   quat_y: number;
   quat_z: number;
   timestamp: number;
-  robot_ip: string; // Added to store robot_ip from message
-  robot_alias: string; // Added to store robot_alias from message
+  robot_ip: string;
+  robot_alias: string;
   calibrated: boolean;
 }
 
@@ -213,12 +250,12 @@ const SimpleYPRVisualizer: React.FC<{ roll: number; pitch: number; yaw: number }
     ctx.fill();
 
   }, [roll, pitch, yaw]); // Removed width, height as they are read once initially
-  
+
   return (
     <canvas
       ref={canvasRef}
-      width={280} // Adjusted for potentially smaller display area
-      height={280} // Adjusted
+      width={280}
+      height={280}
       className="w-full h-full bg-gray-100 rounded-md shadow-inner border border-gray-300"
     />
   );
@@ -234,6 +271,10 @@ const IMUWidget: React.FC = () => {
   const messageBuffer = useRef<ImuData[]>([]);
   const lastUIUpdateTime = useRef(0);
   const animationFrameId = useRef<number | null>(null);
+  const adaptiveTimerRef = useRef<number | null>(null);
+  const adaptiveIntervalRef = useRef(ADAPT.enabled ? ADAPT.minIntervalMs : UI_UPDATE_INTERVAL);
+  const lastRateSampleTimeRef = useRef(Date.now());
+  const receivedSinceSampleRef = useRef(0);
   
   const [history, setHistory] = useState({
     timestamps: [] as string[],
@@ -256,42 +297,39 @@ const IMUWidget: React.FC = () => {
       cancelAnimationFrame(animationFrameId.current);
       animationFrameId.current = null;
     }
-    
     if (messageBuffer.current.length === 0) return;
-    
-    const newMessages = [...messageBuffer.current];
+    let newMessages = messageBuffer.current;
     messageBuffer.current = [];
-
-    if (newMessages.length > 0) {
-      const latestMessage = newMessages[newMessages.length - 1];
-      setCurrentImuData(latestMessage); // Update current display data
-
-      setHistory(prev => {
-          const newTimestamps = newMessages.map(msg => formatTimestampForChart(msg.timestamp));
-          const newRolls = newMessages.map(msg => msg.roll);
-          const newPitches = newMessages.map(msg => msg.pitch);
-          const newYaws = newMessages.map(msg => msg.yaw);
-          const newQuatW = newMessages.map(msg => msg.quat_w);
-          const newQuatX = newMessages.map(msg => msg.quat_x);
-          const newQuatY = newMessages.map(msg => msg.quat_y);
-          const newQuatZ = newMessages.map(msg => msg.quat_z);
-          
-          return {
-            timestamps: [...prev.timestamps, ...newTimestamps].slice(-MAX_HISTORY_POINTS),
-            orientation: {
-              roll: [...prev.orientation.roll, ...newRolls].slice(-MAX_HISTORY_POINTS),
-              pitch: [...prev.orientation.pitch, ...newPitches].slice(-MAX_HISTORY_POINTS),
-              yaw: [...prev.orientation.yaw, ...newYaws].slice(-MAX_HISTORY_POINTS)
-            },
-            quaternion: {
-              w: [...prev.quaternion.w, ...newQuatW].slice(-MAX_HISTORY_POINTS),
-              x: [...prev.quaternion.x, ...newQuatX].slice(-MAX_HISTORY_POINTS),
-              y: [...prev.quaternion.y, ...newQuatY].slice(-MAX_HISTORY_POINTS),
-              z: [...prev.quaternion.z, ...newQuatZ].slice(-MAX_HISTORY_POINTS)
-            }
-          };
-        });
+    if (ADAPT.enabled && newMessages.length > ADAPT.decimationThreshold) {
+      const stride = Math.ceil(newMessages.length / ADAPT.decimationThreshold);
+      newMessages = newMessages.filter((_, i) => i % stride === 0);
     }
+    const latestMessage = newMessages[newMessages.length - 1];
+    setCurrentImuData(latestMessage);
+    setHistory(prev => {
+      const newTimestamps = newMessages.map(msg => formatTimestampForChart(msg.timestamp));
+      const newRolls = newMessages.map(msg => msg.roll);
+      const newPitches = newMessages.map(msg => msg.pitch);
+      const newYaws = newMessages.map(msg => msg.yaw);
+      const newQuatW = newMessages.map(msg => msg.quat_w);
+      const newQuatX = newMessages.map(msg => msg.quat_x);
+      const newQuatY = newMessages.map(msg => msg.quat_y);
+      const newQuatZ = newMessages.map(msg => msg.quat_z);
+      return {
+        timestamps: [...prev.timestamps, ...newTimestamps].slice(-MAX_HISTORY_POINTS),
+        orientation: {
+          roll: [...prev.orientation.roll, ...newRolls].slice(-MAX_HISTORY_POINTS),
+          pitch: [...prev.orientation.pitch, ...newPitches].slice(-MAX_HISTORY_POINTS),
+          yaw: [...prev.orientation.yaw, ...newYaws].slice(-MAX_HISTORY_POINTS)
+        },
+        quaternion: {
+          w: [...prev.quaternion.w, ...newQuatW].slice(-MAX_HISTORY_POINTS),
+          x: [...prev.quaternion.x, ...newQuatX].slice(-MAX_HISTORY_POINTS),
+          y: [...prev.quaternion.y, ...newQuatY].slice(-MAX_HISTORY_POINTS),
+          z: [...prev.quaternion.z, ...newQuatZ].slice(-MAX_HISTORY_POINTS)
+        }
+      };
+    });
   }, []);
 
   const scheduleUIUpdate = useCallback(() => {
@@ -304,6 +342,37 @@ const IMUWidget: React.FC = () => {
         animationFrameId.current = null;
       });
     }
+  }, [processMessageBuffer]);
+
+  const scheduleAdaptiveLoop = useCallback(() => {
+    if (!ADAPT.enabled) return;
+    if (adaptiveTimerRef.current) return;
+    const loop = () => {
+      adaptiveTimerRef.current = null;
+      if (messageBuffer.current.length > 0) {
+        processMessageBuffer();
+      }
+      const backlog = messageBuffer.current.length;
+      const now = Date.now();
+      const dt = now - lastRateSampleTimeRef.current;
+      if (dt >= 1000) {
+        const msgs = receivedSinceSampleRef.current;
+        const rate = msgs / (dt / 1000);
+        if (rate > 0) {
+          let ideal = (ADAPT.targetBatch / rate) * 1000;
+          ideal = Math.max(ADAPT.minIntervalMs, Math.min(ideal, ADAPT.maxIntervalMs));
+          if (backlog > ADAPT.targetBatch * 2) ideal = Math.max(ADAPT.minIntervalMs, ideal * 0.6);
+          adaptiveIntervalRef.current = ideal;
+        }
+        receivedSinceSampleRef.current = 0;
+        lastRateSampleTimeRef.current = now;
+      }
+      if (backlog === 0) {
+        adaptiveIntervalRef.current = Math.min(ADAPT.maxIntervalMs, adaptiveIntervalRef.current * 1.15);
+      }
+      adaptiveTimerRef.current = window.setTimeout(loop, adaptiveIntervalRef.current);
+    };
+    adaptiveTimerRef.current = window.setTimeout(loop, adaptiveIntervalRef.current);
   }, [processMessageBuffer]);
 
   // This effect handles WebSocket message reception
@@ -319,32 +388,35 @@ const IMUWidget: React.FC = () => {
   if (message.type === 'imu_data' && message.data) { // Check for message.data
         const imuPayload = message.data; // This is the object with euler, quaternion, etc.
 
-        // Create a new ImuData object by extracting values from imuPayload
-        const eulerArr = Array.isArray(imuPayload.euler) ? imuPayload.euler : [];
+        // Sanitize arrays first
+        const rawEuler = sanitizeEuler(imuPayload.euler);
+        const rawQuat = sanitizeQuat(imuPayload.quaternion);
+
         // Prefer [yaw, pitch, roll] ordering (sim + backend yaw index default), fallback gracefully
-        const yawVal = typeof eulerArr[0] === 'number' ? eulerArr[0] : (typeof eulerArr[2] === 'number' ? eulerArr[2] : 0);
-        const pitchVal = typeof eulerArr[1] === 'number' ? eulerArr[1] : 0;
-        const rollVal = typeof eulerArr[2] === 'number' ? eulerArr[2] : (typeof eulerArr[0] === 'number' ? eulerArr[0] : 0);
-        const quatArr = Array.isArray(imuPayload.quaternion) ? imuPayload.quaternion : [];
+        const yawVal = typeof rawEuler[0] === 'number' ? rawEuler[0] : (typeof rawEuler[2] === 'number' ? rawEuler[2] : 0);
+        const pitchVal = typeof rawEuler[1] === 'number' ? rawEuler[1] : 0;
+        const rollVal = typeof rawEuler[2] === 'number' ? rawEuler[2] : (typeof rawEuler[0] === 'number' ? rawEuler[0] : 0);
         const newImuEntry: ImuData = {
           roll: rollVal,
           pitch: pitchVal,
           yaw: yawVal,
-          quat_w: typeof quatArr[0] === 'number' ? quatArr[0] : 1.0,
-          quat_x: typeof quatArr[1] === 'number' ? quatArr[1] : 0.0,
-          quat_y: typeof quatArr[2] === 'number' ? quatArr[2] : 0.0,
-          quat_z: typeof quatArr[3] === 'number' ? quatArr[3] : 0.0,
+          quat_w: rawQuat[0],
+          quat_x: rawQuat[1],
+            quat_y: rawQuat[2],
+          quat_z: rawQuat[3],
           timestamp: message.timestamp || Date.now() / 1000, // Timestamp from the outer message
           robot_ip: message.robot_ip, 
           robot_alias: message.robot_alias,
           calibrated: currentImuData?.calibrated ?? false 
         };
 
-  // Always buffer and schedule UI updates
+  // Always buffer and schedule UI updates (apply buffer cap + decimation if necessary)
+  if (ADAPT.enabled && messageBuffer.current.length >= ADAPT.maxBuffer) {
+    // Drop oldest half to avoid unbounded growth
+    messageBuffer.current = messageBuffer.current.slice(-Math.floor(ADAPT.maxBuffer/2));
+  }
   messageBuffer.current.push(newImuEntry);
   scheduleUIUpdate();
-        // Update currentImuData to show the latest values even if paused, 
-        // so when unpaused, it doesn't jump from very old data.
         setCurrentImuData(newImuEntry);
         setWidgetError(null); // Clear previous errors on new data
 
@@ -357,7 +429,7 @@ const IMUWidget: React.FC = () => {
             const accelCal = calStatus.accel ?? 0;
             const magCal = calStatus.mag ?? 0;
             const isCalibrated = sysCal >= 2 && gyroCal >= 2 && accelCal >= 1 && magCal >= 1;
-            setCurrentImuData(prev => ({ ...(prev || {} as ImuData), calibrated: isCalibrated }));
+            setCurrentImuData((prev: ImuData | null) => ({ ...(prev || {} as ImuData), calibrated: isCalibrated }));
         }
       } else if (message.type === 'error' && message.robot_alias === selectedRobotId) {
         setWidgetError(message.message || 'Unknown error from IMU data stream');
@@ -374,19 +446,22 @@ const IMUWidget: React.FC = () => {
           const recent = stored.imu.slice(-Math.min(100, stored.imu.length));
           recent.forEach((m: any) => {
             const imuPayload = m.data || {};
-            const eulerArr = Array.isArray(imuPayload.euler) ? imuPayload.euler : [];
-            const yawVal = typeof eulerArr[0] === 'number' ? eulerArr[0] : (typeof eulerArr[2] === 'number' ? eulerArr[2] : 0);
-            const pitchVal = typeof eulerArr[1] === 'number' ? eulerArr[1] : 0;
-            const rollVal = typeof eulerArr[2] === 'number' ? eulerArr[2] : (typeof eulerArr[0] === 'number' ? eulerArr[0] : 0);
-            const quatArr = Array.isArray(imuPayload.quaternion) ? imuPayload.quaternion : [];
+            const rawEuler = sanitizeEuler(imuPayload.euler);
+            const rawQuat = sanitizeQuat(imuPayload.quaternion);
+            const yawVal = typeof rawEuler[0] === 'number' ? rawEuler[0] : (typeof rawEuler[2] === 'number' ? rawEuler[2] : 0);
+            const pitchVal = typeof rawEuler[1] === 'number' ? rawEuler[1] : 0;
+            const rollVal = typeof rawEuler[2] === 'number' ? rawEuler[2] : (typeof rawEuler[0] === 'number' ? rawEuler[0] : 0);
+            if (ADAPT.enabled && messageBuffer.current.length >= ADAPT.maxBuffer) {
+              messageBuffer.current = messageBuffer.current.slice(-Math.floor(ADAPT.maxBuffer/2));
+            }
             messageBuffer.current.push({
               roll: rollVal,
               pitch: pitchVal,
               yaw: yawVal,
-              quat_w: typeof quatArr[0] === 'number' ? quatArr[0] : 1.0,
-              quat_x: typeof quatArr[1] === 'number' ? quatArr[1] : 0.0,
-              quat_y: typeof quatArr[2] === 'number' ? quatArr[2] : 0.0,
-              quat_z: typeof quatArr[3] === 'number' ? quatArr[3] : 0.0,
+              quat_w: rawQuat[0],
+              quat_x: rawQuat[1],
+              quat_y: rawQuat[2],
+              quat_z: rawQuat[3],
               timestamp: m.timestamp || Date.now() / 1000,
               robot_ip: m.robot_ip || selectedRobotId,
               robot_alias: selectedRobotId,
@@ -433,9 +508,19 @@ const IMUWidget: React.FC = () => {
   // Removed toggleLiveUpdate; always live
 
   useEffect(() => {
-    const intervalId = setInterval(scheduleUIUpdate, UI_UPDATE_INTERVAL);
-    return () => clearInterval(intervalId);
-  }, [scheduleUIUpdate]);
+    if (ADAPT.enabled) {
+      scheduleAdaptiveLoop();
+    } else {
+      const intervalId = setInterval(scheduleUIUpdate, UI_UPDATE_INTERVAL);
+      return () => clearInterval(intervalId);
+    }
+    return () => {
+      if (adaptiveTimerRef.current) {
+        clearTimeout(adaptiveTimerRef.current);
+        adaptiveTimerRef.current = null;
+      }
+    };
+  }, [scheduleAdaptiveLoop, scheduleUIUpdate]);
 
   useEffect(() => {
     return () => {

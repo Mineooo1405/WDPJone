@@ -31,7 +31,8 @@ ChartJS.register(
 
 // Modify these constants for faster updates
 const MAX_HISTORY_POINTS = appConfig.encoder.maxHistoryPoints;
-const UI_UPDATE_INTERVAL = appConfig.encoder.uiUpdateIntervalMs;
+const UI_UPDATE_INTERVAL = appConfig.encoder.uiUpdateIntervalMs; // legacy fallback
+const ADAPT = appConfig.encoder.adaptive;
 
 // Re-define EncoderData interface
 interface EncoderData {
@@ -72,6 +73,10 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
   const messageBuffer = useRef<EncoderData[]>([]);
   const lastUIUpdateTime = useRef(0);
   const animationFrameId = useRef<number | null>(null);
+  const adaptiveIntervalRef = useRef(ADAPT?.enabled ? ADAPT.minIntervalMs : UI_UPDATE_INTERVAL);
+  const lastRateSampleTimeRef = useRef<number>(Date.now());
+  const receivedSinceSampleRef = useRef(0);
+  const adaptiveTimerRef = useRef<number | null>(null);
   const chartRef = useRef<any>(null);
   const subscribedRobotId = useRef<string | null>(null); // Track the currently subscribed robot ID
 
@@ -86,38 +91,32 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
       cancelAnimationFrame(animationFrameId.current);
       animationFrameId.current = null;
     }
-      if (messageBuffer.current.length === 0 || isPaused) return; // Added isPaused check here too
-    
-      const newMessages = [...messageBuffer.current];
-      messageBuffer.current = [];
-  
-      if (newMessages.length > 0) {
-        const latestMessage = newMessages[newMessages.length - 1];
-        setEncoderData(latestMessage); // Update latest data display even if paused
-      
-      // Only update history if not paused
-      //if (!isPaused) { // Removed the !isPaused check here, let it accumulate if needed, control display with pause
-        setEncoderHistory(prev => {
-            const newTimestamps = newMessages.map(msg => formatTimestampForChart(msg.timestamp));
-            const newEncoder1 = newMessages.map(msg => msg.rpm_1);
-            const newEncoder2 = newMessages.map(msg => msg.rpm_2);
-            const newEncoder3 = newMessages.map(msg => msg.rpm_3);
-            const anyFour = newMessages.some(m => typeof m.rpm_4 === 'number');
-            const newEncoder4 = anyFour ? newMessages.map(msg => (typeof msg.rpm_4 === 'number' ? (msg.rpm_4 as number) : NaN)) : [];
-            const next: typeof prev = {
-              timestamps: [...prev.timestamps, ...newTimestamps].slice(-MAX_HISTORY_POINTS),
-              encoder1: [...prev.encoder1, ...newEncoder1].slice(-MAX_HISTORY_POINTS),
-              encoder2: [...prev.encoder2, ...newEncoder2].slice(-MAX_HISTORY_POINTS),
-              encoder3: [...prev.encoder3, ...newEncoder3].slice(-MAX_HISTORY_POINTS),
-              encoder4: (prev.encoder4 || anyFour)
-                ? ([...(prev.encoder4 || []), ...newEncoder4].slice(-MAX_HISTORY_POINTS))
-                : undefined
-            };
-            return next;
-        });
-      //} // Removed closing bracket
+    if (messageBuffer.current.length === 0 || isPaused) return;
+    let newMessages = messageBuffer.current;
+    messageBuffer.current = [];
+    // Decimation nếu batch quá lớn
+    if (ADAPT.enabled && newMessages.length > ADAPT.decimationThreshold) {
+      const stride = Math.ceil(newMessages.length / ADAPT.decimationThreshold);
+      newMessages = newMessages.filter((_, i) => i % stride === 0);
     }
-  }, [isPaused]); // isPaused dependency is correct
+    const latestMessage = newMessages[newMessages.length - 1];
+    setEncoderData(latestMessage);
+    setEncoderHistory(prev => {
+      const newTimestamps = newMessages.map(msg => formatTimestampForChart(msg.timestamp));
+      const newEncoder1 = newMessages.map(msg => msg.rpm_1);
+      const newEncoder2 = newMessages.map(msg => msg.rpm_2);
+      const newEncoder3 = newMessages.map(msg => msg.rpm_3);
+      const anyFour = newMessages.some(m => typeof m.rpm_4 === 'number');
+      const newEncoder4 = anyFour ? newMessages.map(msg => (typeof msg.rpm_4 === 'number' ? (msg.rpm_4 as number) : NaN)) : [];
+      return {
+        timestamps: [...prev.timestamps, ...newTimestamps].slice(-MAX_HISTORY_POINTS),
+        encoder1: [...prev.encoder1, ...newEncoder1].slice(-MAX_HISTORY_POINTS),
+        encoder2: [...prev.encoder2, ...newEncoder2].slice(-MAX_HISTORY_POINTS),
+        encoder3: [...prev.encoder3, ...newEncoder3].slice(-MAX_HISTORY_POINTS),
+        encoder4: (prev.encoder4 || anyFour) ? ([...(prev.encoder4 || []), ...newEncoder4].slice(-MAX_HISTORY_POINTS)) : undefined
+      };
+    });
+  }, [isPaused]);
 
   const scheduleUIUpdate = useCallback(() => {
     if (animationFrameId.current !== null) return;
@@ -137,6 +136,46 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
     }
   }, [processMessageBuffer, isPaused]); // Added isPaused
 
+  const scheduleAdaptiveLoop = useCallback(() => {
+    if (!ADAPT.enabled || !liveUpdate) return;
+    if (adaptiveTimerRef.current) return; // already scheduled
+    const run = () => {
+      adaptiveTimerRef.current = null;
+      // Flush if có dữ liệu
+      if (!isPaused && messageBuffer.current.length > 0) {
+        processMessageBuffer();
+      }
+      // Adaptive tính toán dựa trên batch vừa flush hoặc backlog
+      const backlog = messageBuffer.current.length;
+      const now = Date.now();
+      // Tính rate mỗi ~1000ms
+      const dtRate = now - lastRateSampleTimeRef.current;
+      if (dtRate >= 1000) {
+        const msgs = receivedSinceSampleRef.current;
+        const rate = msgs / (dtRate / 1000); // msg/s
+        // Heuristic điều chỉnh mục tiêu khoảng cập nhật
+        // Mục tiêu: mỗi flush ~ targetBatch
+        if (rate > 0) {
+          const idealInterval = (ADAPT.targetBatch / rate) * 1000; // ms
+          let next = Math.max(ADAPT.minIntervalMs, Math.min(idealInterval, ADAPT.maxIntervalMs));
+          // Nếu backlog lớn hơn 2 * targetBatch thì giảm interval nhanh
+          if (backlog > ADAPT.targetBatch * 2) {
+            next = Math.max(ADAPT.minIntervalMs, next * 0.6);
+          }
+          adaptiveIntervalRef.current = next;
+        }
+        receivedSinceSampleRef.current = 0;
+        lastRateSampleTimeRef.current = now;
+      }
+      // Nếu backlog rất nhỏ (0) tăng dần interval để giảm CPU
+      if (backlog === 0) {
+        adaptiveIntervalRef.current = Math.min(ADAPT.maxIntervalMs, adaptiveIntervalRef.current * 1.15);
+      }
+      adaptiveTimerRef.current = window.setTimeout(run, adaptiveIntervalRef.current);
+    };
+    adaptiveTimerRef.current = window.setTimeout(run, adaptiveIntervalRef.current);
+  }, [isPaused, liveUpdate, processMessageBuffer]);
+
   useEffect(() => {
     // Primary path: if an incoming live message for the selected robot arrives, use it
     if (lastJsonMessage) {
@@ -144,11 +183,26 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
       if (selectedRobotId && message.robot_alias === selectedRobotId && message.type === 'encoder_data') {
         const rpmList = message.data as number[];
         if (rpmList && Array.isArray(rpmList) && rpmList.length >= 3) {
+          const clean = (v: any): number => {
+            if (v === null || v === undefined) return 0;
+            if (typeof v === 'number' && Number.isFinite(v)) return v;
+            if (typeof v === 'string') {
+              const s = v.trim().toLowerCase();
+              if (s === '' || ['na','n/a','null','none','nan','invalid','--'].includes(s)) return 0;
+              const parsed = Number(s.replace(',', '.'));
+              return Number.isFinite(parsed) ? parsed : 0;
+            }
+            return 0;
+          };
+          const r1 = clean(rpmList[0]);
+          const r2 = clean(rpmList[1]);
+          const r3 = clean(rpmList[2]);
+          const r4 = rpmList.length >= 4 ? clean(rpmList[3]) : undefined;
           const newEncoderEntry: EncoderData = {
-            rpm_1: rpmList[0] ?? 0,
-            rpm_2: rpmList[1] ?? 0,
-            rpm_3: rpmList[2] ?? 0,
-            rpm_4: rpmList.length >= 4 ? (rpmList[3] ?? 0) : undefined,
+            rpm_1: r1,
+            rpm_2: r2,
+            rpm_3: r3,
+            rpm_4: r4,
             timestamp: message.timestamp || Date.now() / 1000,
             robot_ip: message.robot_ip,
             robot_alias: message.robot_alias
@@ -172,11 +226,22 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
           recent.forEach((m: any) => {
             const rpmList = m.data as number[];
             if (rpmList && rpmList.length >= 3) {
+              const clean = (v: any): number => {
+                if (v === null || v === undefined) return 0;
+                if (typeof v === 'number' && Number.isFinite(v)) return v;
+                if (typeof v === 'string') {
+                  const s = v.trim().toLowerCase();
+                  if (s === '' || ['na','n/a','null','none','nan','invalid','--'].includes(s)) return 0;
+                  const parsed = Number(s.replace(',', '.'));
+                  return Number.isFinite(parsed) ? parsed : 0;
+                }
+                return 0;
+              };
               messageBuffer.current.push({
-                rpm_1: rpmList[0] ?? 0,
-                rpm_2: rpmList[1] ?? 0,
-        rpm_3: rpmList[2] ?? 0,
-        rpm_4: rpmList.length >= 4 ? (rpmList[3] ?? 0) : undefined,
+                rpm_1: clean(rpmList[0]),
+                rpm_2: clean(rpmList[1]),
+        rpm_3: clean(rpmList[2]),
+        rpm_4: rpmList.length >= 4 ? clean(rpmList[3]) : undefined,
                 timestamp: m.timestamp || Date.now() / 1000,
                 robot_ip: m.robot_ip || selectedRobotId,
                 robot_alias: selectedRobotId,
@@ -268,18 +333,44 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
   }, [selectedRobotId, readyState, liveUpdate]);
 
   useEffect(() => {
-    const intervalId = setInterval(scheduleUIUpdate, UI_UPDATE_INTERVAL);
-    return () => clearInterval(intervalId);
-  }, [scheduleUIUpdate]);
-
-  useEffect(() => {
+    if (!ADAPT.enabled) return; // keep legacy path
+    // Clear legacy interval if any existed (defensive)
     return () => {
-      if (animationFrameId.current) {
-        cancelAnimationFrame(animationFrameId.current);
-        animationFrameId.current = null;
+      if (adaptiveTimerRef.current) {
+        window.clearTimeout(adaptiveTimerRef.current);
+        adaptiveTimerRef.current = null;
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (ADAPT.enabled) {
+      scheduleAdaptiveLoop();
+    } else {
+      const intervalId = setInterval(scheduleUIUpdate, UI_UPDATE_INTERVAL);
+      return () => clearInterval(intervalId);
+    }
+    return () => {
+      if (adaptiveTimerRef.current) {
+        window.clearTimeout(adaptiveTimerRef.current);
+        adaptiveTimerRef.current = null;
+      }
+    };
+  }, [scheduleAdaptiveLoop, scheduleUIUpdate]);
+
+  useEffect(() => {
+    // Track incoming rate for adaptive logic
+    if (!lastJsonMessage) return;
+    const message = lastJsonMessage as any;
+    if (message.type === 'encoder_data' && message.robot_alias === selectedRobotId) {
+      receivedSinceSampleRef.current += 1;
+      // Hard cap buffer
+      if (ADAPT.enabled && messageBuffer.current.length > ADAPT.maxBuffer) {
+        // Drop oldest half to relieve memory
+        messageBuffer.current.splice(0, messageBuffer.current.length - Math.floor(ADAPT.maxBuffer * 0.5));
+      }
+    }
+  }, [lastJsonMessage, selectedRobotId]);
 
   const clearHistory = () => {
   setEncoderHistory({ timestamps: [], encoder1: [], encoder2: [], encoder3: [], encoder4: [] });
@@ -316,11 +407,13 @@ const EncoderDataWidget: React.FC<{ compact?: boolean }> = ({ compact = false })
 
   const togglePause = useCallback(() => {
     setIsPaused(prev => !prev);
-    // When resuming, might want to immediately schedule an update if buffer has data
-    if (!isPaused) { // Note: isPaused is the value *before* toggle
-        scheduleUIUpdate();
+    if (isPaused && ADAPT.enabled) {
+      // Khi resume trong adaptive mode, kích hoạt loop ngay để flush
+      scheduleAdaptiveLoop();
+    } else if (isPaused) {
+      scheduleUIUpdate();
     }
-  }, [isPaused, scheduleUIUpdate]); // Added scheduleUIUpdate
+  }, [isPaused, scheduleAdaptiveLoop, scheduleUIUpdate]);
 
   let derivedStatusText: string;
   if (readyState === ReadyState.CONNECTING) {

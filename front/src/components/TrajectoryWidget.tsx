@@ -541,7 +541,8 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     };
     reader.readAsDataURL(file);
   };
-  const handleCanvasClick = (evt: React.MouseEvent<HTMLCanvasElement>) => {
+  // Đổi hành vi: Double-click mới gửi lệnh điều hướng thay vì single click
+  const handleCanvasDoubleClick = (evt: React.MouseEvent<HTMLCanvasElement>) => {
     if (!selectedRobotId || firmwareUpdateMode) return;
     const chart = chartRef.current as any;
     if (!chart) return;
@@ -699,7 +700,12 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
             <p className="text-lg font-semibold">Trajectory view disabled during Firmware Update.</p>
           </div>
         ) : (
-          <canvas ref={canvasRef} onClick={handleCanvasClick}></canvas>
+          <div className="w-full h-full relative">
+            <canvas ref={canvasRef} onDoubleClick={handleCanvasDoubleClick} className="w-full h-full" />
+            <div className="absolute bottom-1 right-2 text-[10px] opacity-70 bg-gray-900/50 px-1.5 py-0.5 rounded pointer-events-none select-none">
+              Double-click để đặt điểm đến
+            </div>
+          </div>
         )}
       </div>
     </div>

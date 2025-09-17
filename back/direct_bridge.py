@@ -2284,10 +2284,30 @@ def transform_robot_message(message_dict: dict) -> dict:
     - Preserve original payload under generic_* types when unknown.
     The robot_ip and robot_alias fields are filled by the caller after transform.
     """
+    # --- Normalization Helpers ---
+    # Extend NA token set to catch more firmware variants
+    NA_TOKENS = {"na", "n/a", "null", "none", "nan", "n.a", "--", "missing", "invalid"}
+
+    def _is_na(v):
+        if v is None:
+            return True
+        if isinstance(v, str):
+            vs = v.strip().lower()
+            if vs == "":
+                return True
+            if vs in NA_TOKENS:
+                return True
+        return False
+
     def _num(v, default=0.0):
+        """Coerce a value to float with NA handling; returns default on failure."""
+        if _is_na(v):
+            return float(default)
         try:
-            if v is None or (isinstance(v, str) and v.strip() == ""):
-                return float(default)
+            # Strings like '12,3' (comma decimal) -> replace comma
+            if isinstance(v, str):
+                vv = v.strip().replace(',', '.')
+                return float(vv)
             return float(v)
         except Exception:
             return float(default)
@@ -2321,10 +2341,19 @@ def transform_robot_message(message_dict: dict) -> dict:
             euler = _list_num(euler, 3, 0.0)
         else:
             # Accept alternative keys or fill defaults
-            euler = [_num(src.get("heading", 0.0)), _num(src.get("pitch", 0.0)), _num(src.get("roll", 0.0))]
+            euler = [
+                _num(src.get("heading", src.get("yaw", 0.0)), 0.0),
+                _num(src.get("pitch", 0.0), 0.0),
+                _num(src.get("roll", 0.0), 0.0)
+            ]
         quat = src.get("quaternion")
         if isinstance(quat, (list, tuple)):
-            quat = _list_num(quat, 4, 0.0)
+            # Preserve identity quaternion default for w=1.0, others 0.0
+            w = _num(quat[0] if len(quat) > 0 else 1.0, 1.0)
+            x = _num(quat[1] if len(quat) > 1 else 0.0, 0.0)
+            y = _num(quat[2] if len(quat) > 2 else 0.0, 0.0)
+            z = _num(quat[3] if len(quat) > 3 else 0.0, 0.0)
+            quat = [w, x, y, z]
         else:
             quat = [_num(src.get("quat_w", 1.0), 1.0), _num(src.get("quat_x", 0.0)), _num(src.get("quat_y", 0.0)), _num(src.get("quat_z", 0.0))]
         transformed_payload["data"] = {
@@ -2343,9 +2372,17 @@ def transform_robot_message(message_dict: dict) -> dict:
             # Fallback: look for legacy keys rpm_1..rpm_4
             rpms = [message_dict.get("rpm_1"), message_dict.get("rpm_2"), message_dict.get("rpm_3"), message_dict.get("rpm_4")]
             rpms = [v for v in rpms if v is not None]
-        # Coerce numbers and keep as-is length (can be 0..N)
-        rpms_coerced = [ _num(v, 0.0) for v in rpms ] if isinstance(rpms, list) else []
+        # Coerce numbers and keep as-is length (can be 0..N); treat NA tokens as default 0.0
+        rpms_coerced = []
+        had_na = False
+        if isinstance(rpms, list):
+            for v in rpms:
+                if _is_na(v):
+                    had_na = True
+                rpms_coerced.append(_num(v, 0.0))
         transformed_payload["data"] = rpms_coerced
+        if had_na:
+            transformed_payload["encoder_note"] = "one_or_more_values_missing_or_na"
         if robot_reported_id:
             transformed_payload["robot_reported_id"] = robot_reported_id
 
@@ -2362,15 +2399,34 @@ def transform_robot_message(message_dict: dict) -> dict:
             y = _num(pos_arr[1], 0.0)
             theta_deg = _num(pos_arr[2], 0.0)
             theta_rad = theta_deg * math.pi / 180.0
+        else:
+            # Accept flat keys x,y,theta (deg) if provided
+            if not isinstance(pos_arr, (list, tuple)):
+                x = _num(src.get("x", 0.0))
+                y = _num(src.get("y", 0.0))
+                # theta may be in degrees or radians; we assume degrees when magnitude > 2π*2
+                theta_val = _num(src.get("theta", src.get("heading", 0.0)), 0.0)
+                if abs(theta_val) > 6.28318 * 2:  # very likely degrees
+                    theta_rad = theta_val * math.pi / 180.0
+                else:
+                    theta_rad = theta_val
         transformed_payload["data"] = {"x": x, "y": y, "theta": theta_rad}
+        if any(_is_na(v) for v in [src.get("x"), src.get("y"), src.get("theta"), src.get("heading")]):
+            transformed_payload["position_note"] = "one_or_more_fields_missing_or_na"
         if robot_reported_id:
             transformed_payload["robot_reported_id"] = robot_reported_id
 
     # 4) Log data (string message), tolerate missing message/level
     elif original_type == "log":
         transformed_payload["type"] = "log"
-        transformed_payload["message"] = message_dict.get("message", "")
-        transformed_payload["level"] = str(message_dict.get("level", "debug")).lower()
+        raw_msg = message_dict.get("message", "")
+        if _is_na(raw_msg):
+            raw_msg = ""
+        transformed_payload["message"] = raw_msg
+        level_raw = message_dict.get("level", "debug")
+        if _is_na(level_raw):
+            level_raw = "debug"
+        transformed_payload["level"] = str(level_raw).lower()
         if robot_reported_id:
             transformed_payload["robot_reported_id"] = robot_reported_id
 
