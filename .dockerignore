@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+logs
+**/node_modules
+front/build
+temp_firmware
+*.db
+*.sqlite
+*.sqlite3
+*.log
+back/__pycache__
+front/.cache
+front/.eslintcache
+Robot_code

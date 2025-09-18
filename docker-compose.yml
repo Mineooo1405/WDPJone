@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: wdpjone-backend
+    environment:
+      - WS_BRIDGE_PORT=9003
+      - TCP_PORT=12346
+      - OTA_PORT=12345
+      - LOG_LEVEL=INFO
+    ports:
+      - "9003:9003"   # WebSocket bridge
+      - "12346:12346" # Control TCP
+      - "12345:12345" # OTA TCP
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        REACT_APP_WS_BRIDGE_URL: ws://localhost:9003
+    container_name: wdpjone-frontend
+    ports:
+      - "8080:80"  # Nginx serving built app
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+networks:
+  default:
+    name: wdpjone-net

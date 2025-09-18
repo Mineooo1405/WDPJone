@@ -13,7 +13,7 @@ build/
 
 # Bỏ qua các tệp cấu hình môi trường
 .env
-
+.venv
 temp_firmware/
 Robot_code/
 OTA1_Omni/
