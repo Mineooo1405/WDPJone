@@ -1,15 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { useRobotContext, ConnectedRobot } from './RobotContext';
+import { useRobotContext } from './RobotContext';
 import { ReadyState } from 'react-use-websocket';
 import { Bot, RefreshCw } from 'lucide-react';
 
-// Nên định nghĩa interface này ở một nơi dùng chung nếu nhiều component sử dụng
-interface RobotListItem {
-  robot_id: string;
-  ip: string;
-  active?: boolean;
-  // Thêm các trường khác nếu API trả về, ví dụ: port, last_seen
-}
+// Removed unused RobotListItem interface & unused ConnectedRobot import to satisfy lint
 
 const WebSocketStatusIndicator: React.FC<{ readyState: ReadyState | undefined }> = ({ readyState }) => {
   let statusText = "WS: Không rõ";

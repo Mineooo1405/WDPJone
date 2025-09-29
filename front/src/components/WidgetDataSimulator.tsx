@@ -51,6 +51,61 @@ const WidgetDataSimulator: React.FC = () => {
         }
     }, [addOnSendListener]);
 
+    // Stable dispatcher for mock data (defined before effects that depend on it)
+    const dispatchMockData = useCallback((actual_type: string, content_payload: any) => {
+        if (!sendMessage) {
+            console.warn('Simulator: sendMessage function is not available.');
+            return;
+        }
+
+        let messageToSend;
+        const FORWARD_TO_BACKEND_TYPE = 'FORWARD_TO_BACKEND_FOR_PROCESSING';
+        const LOCAL_DISPATCH_TYPE = 'SIMULATOR_DISPATCH_MESSAGE_TO_WIDGETS';
+
+        if (actual_type === 'imu' || actual_type === 'encoder') {
+            let raw_robot_data_field;
+            let robot_message_type_for_transform;
+
+            if (actual_type === 'imu') {
+                robot_message_type_for_transform = 'bno055';
+                raw_robot_data_field = {
+                    time: Date.now() / 1000,
+                    euler: content_payload.data.euler,
+                    quaternion: content_payload.data.quaternion
+                };
+            } else { // encoder
+                robot_message_type_for_transform = 'encoder';
+                raw_robot_data_field = [content_payload.rpm1, content_payload.rpm2, content_payload.rpm3];
+            }
+
+            const raw_robot_message_to_forward = {
+                id: simulatedRobotIp,
+                type: robot_message_type_for_transform,
+                data: raw_robot_data_field
+            };
+
+            messageToSend = {
+                type: FORWARD_TO_BACKEND_TYPE,
+                robot_ip_context: simulatedRobotIp,
+                raw_message_content: raw_robot_message_to_forward
+            };
+        } else {
+            messageToSend = {
+                type: LOCAL_DISPATCH_TYPE,
+                actual_type,
+                payload: {
+                    robot_ip: simulatedRobotIp,
+                    robot_alias: `${simulatedRobotIp}_alias_local_sim`,
+                    original_id_field: simulatedRobotIp,
+                    timestamp: Date.now() / 1000,
+                    ...content_payload
+                },
+            };
+        }
+        sendMessage(messageToSend);
+        console.log('Simulator dispatched:', messageToSend);
+    }, [sendMessage, simulatedRobotIp]);
+
     // useEffect for auto-simulation intervals
     useEffect(() => {
         let imuIntervalId: NodeJS.Timeout | undefined;
@@ -84,64 +139,8 @@ const WidgetDataSimulator: React.FC = () => {
             if (imuIntervalId) clearInterval(imuIntervalId);
             if (encoderIntervalId) clearInterval(encoderIntervalId);
         };
-    }, [isAutoSimulating, simulatedRobotIp, sendMessage]); // Added dependencies
+    }, [isAutoSimulating, simulatedRobotIp, sendMessage, dispatchMockData]); // exhaustive deps satisfied
 
-    const dispatchMockData = (actual_type: string, content_payload: any) => {
-        if (!sendMessage) {
-            console.warn('Simulator: sendMessage function is not available.');
-            return;
-        }
-
-        let messageToSend;
-        const FORWARD_TO_BACKEND_TYPE = 'FORWARD_TO_BACKEND_FOR_PROCESSING';
-        const LOCAL_DISPATCH_TYPE = 'SIMULATOR_DISPATCH_MESSAGE_TO_WIDGETS';
-
-        if (actual_type === 'imu' || actual_type === 'encoder') {
-            let raw_robot_data_field;
-            let robot_message_type_for_transform;
-
-            if (actual_type === 'imu') {
-                robot_message_type_for_transform = 'bno055'; // Match direct_bridge transform target
-                // content_payload is expected to be { data: { euler: [...], quaternion: [...] } }
-                raw_robot_data_field = {
-                    time: Date.now() / 1000, // Timestamp from "robot"
-                    euler: content_payload.data.euler,
-                    quaternion: content_payload.data.quaternion
-                };
-            } else { // encoder
-                robot_message_type_for_transform = 'encoder';
-                // content_payload is expected to be { rpm1, rpm2, rpm3 }
-                raw_robot_data_field = [content_payload.rpm1, content_payload.rpm2, content_payload.rpm3];
-            }
-
-            const raw_robot_message_to_forward = {
-                id: simulatedRobotIp, // Robot's own ID field for transform_robot_message
-                type: robot_message_type_for_transform,
-                data: raw_robot_data_field
-            };
-
-            messageToSend = {
-                type: FORWARD_TO_BACKEND_TYPE,
-                robot_ip_context: simulatedRobotIp, // For backend to identify the simulated source
-                raw_message_content: raw_robot_message_to_forward // The message resembling what a robot sends via TCP
-            };
-        } else {
-            // For 'log', 'robot_status', 'position_update' - use local dispatch
-            messageToSend = {
-                type: LOCAL_DISPATCH_TYPE,
-                actual_type,
-                payload: {
-                    robot_ip: simulatedRobotIp,
-                    robot_alias: `${simulatedRobotIp}_alias_local_sim`,
-                    original_id_field: simulatedRobotIp,
-                    timestamp: Date.now() / 1000, // Simulate bridge's receive time
-                    ...content_payload
-                },
-            };
-        }
-        sendMessage(messageToSend);
-        console.log('Simulator dispatched:', messageToSend);
-    };
 
     // --- Handlers for dispatching mock data ---
     const handleSendImu = () => {

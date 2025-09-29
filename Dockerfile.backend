@@ -1,32 +1,68 @@
+## ---------------------------------------------------------------------------
+## Backend Multi‑Stage Dockerfile
+##  - Stage 1 (builder): install build tools & Python deps (wheels cached)
+##  - Stage 2 (runtime): copy only installed site-packages + source, run as non-root
+##  - Keeps runtime small (no build-essential) while preserving required shared libs.
+## ---------------------------------------------------------------------------
 # syntax=docker/dockerfile:1
 
-FROM python:3.12-slim AS base
+ARG PYTHON_VERSION=3.12-slim
 
+FROM python:${PYTHON_VERSION} AS builder
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-
 WORKDIR /app
 
-# Install system deps for Pillow and building wheels
+# System deps required to compile wheels (removed later)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential libjpeg-dev zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency manifest(s) and install
-COPY requirement.txt /app/requirement.txt
-RUN pip install --no-cache-dir -r requirement.txt
+COPY requirement.txt ./
+# Install into an explicit venv to make copying easier
+RUN python -m venv /opt/venv \
+ && . /opt/venv/bin/activate \
+ && pip install --upgrade pip \
+ && pip install --no-cache-dir -r requirement.txt
 
-# Copy source
-COPY back /app/back
+## ----- Runtime Image -----
+FROM python:${PYTHON_VERSION} AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
 
-# Expose service ports
+# Only runtime shared libs (no build-essential)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libjpeg62-turbo zlib1g \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy virtualenv from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Add dedicated user (avoid running as root)
+RUN useradd -r -u 1000 appuser \
+ && chown -R appuser:appuser /app
+
+# Copy source code (only what we need)
+COPY back ./back
+
+USER appuser
+
+# Expose service ports (WebSocket + TCP + OTA)
 EXPOSE 9003 12346 12345
 
-# Environment defaults (can be overridden)
+# Environment defaults (override via compose or docker run)
 ENV WS_BRIDGE_PORT=9003 \
     TCP_PORT=12346 \
     OTA_PORT=12345 \
     LOG_LEVEL=INFO
 
-# Run the DirectBridge
+# (Optional) Basic healthcheck: verify WS port listening
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+    CMD python -c "import socket,os,sys;port=int(os.getenv('WS_BRIDGE_PORT','9003'));s=socket.socket();s.settimeout(2);\n\
+try:\n\
+ s.connect(('127.0.0.1',port));s.close();sys.exit(0)\n\
+except Exception: sys.exit(1)" || exit 1
+
 CMD ["python", "back/direct_bridge.py"]

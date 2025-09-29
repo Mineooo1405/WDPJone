@@ -88,6 +88,11 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
   const [commandSending, setCommandSending] = useState(false);
   const [imuData, setImuData] = useState<ImuData>({ heading: 0, pitch: 0, roll: 0, calibrated: false });
   const [robotPosition, setRobotPosition] = useState<PositionData>({ x: 0, y: 0, theta: 0 });
+  // Đảo chiều trục X/Y theo yêu cầu
+  const SIGN_X = -1;
+  const SIGN_Y = -1;
+  // Chế độ chỉ dùng bàn phím
+  const KEYBOARD_ONLY = true;
   
   const joystickRef = useRef<HTMLDivElement>(null);
   const knobRef = useRef<HTMLDivElement>(null);
@@ -143,6 +148,13 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
     }, 100); // 100ms throttle
   }, [selectedRobotId, sendWsCommand, webSocketIsConnected]);
 
+  // Gửi motion trực tiếp (phục vụ giữ phím liên tục)
+  const sendMotionRaw = useCallback((x: number, y: number, theta: number) => {
+    if (!selectedRobotId || !webSocketIsConnected) return;
+    const msg = { command: 'vector_control', robot_alias: selectedRobotId, dot_x: x, dot_y: y, dot_theta: theta, stop_time: 0 } as any;
+    sendMessage(msg);
+  }, [selectedRobotId, webSocketIsConnected, sendMessage]);
+
   const updateVelocities = useCallback((x: number, y: number, theta: number) => {
     const newVelocities = { x: parseFloat(x.toFixed(2)), y: parseFloat(y.toFixed(2)), theta: parseFloat(theta.toFixed(2)) };
     setVelocities(newVelocities);
@@ -173,109 +185,111 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
 
   // Emergency stop removed per request
 
-  // --- START: Keyboard Control Logic (Step per key press) ---
+  // --- START: Keyboard Control Logic (continuous) ---
   useEffect(() => {
-  const KBD_SPEED_LINEAR = 0.3; // m/s
-  const KBD_ANGULAR_SPEED = 0.5; // rad/s
-  const STEP_DURATION_MS = 200; // thời gian mỗi bước
-
-    const sendStep = (vx: number, vy: number, omega: number) => {
-      // Gửi xung chuyển động ngắn, sau đó tự dừng
-      // Truyền stop_time để backend tích phân trong khoảng thời gian ngắn
-      throttledSendCommand({ type: "motion", x: vx, y: vy, theta: omega, stop_time: STEP_DURATION_MS } as any);
-      setTimeout(() => {
-        throttledSendCommand({ type: "motion", x: 0, y: 0, theta: 0 });
-      }, STEP_DURATION_MS);
-    };
-
-    const kbRef = keyboardControlRef.current;
-    if (!kbRef) return;
-
-    const handleFocus = () => setHasFocus(true);
-    const handleBlur = () => setHasFocus(false);
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (!hasFocus) return;
-      const key = event.key.toLowerCase();
-      if (["w","a","s","d","q","e"].includes(key)) {
-        // Bỏ auto-repeat để mỗi lần nhấn là một bước
-        if ((event as any).repeat) return;
-        event.preventDefault();
-        setKeysPressed(prev => ({ ...prev, [key]: true }));
-  let vx = 0, vy = 0, omg = 0;
-  // Theo kinematics của bridge: +X (vx) là tiến; +Y (vy) là trái.
-  if (key === 'w') vx = KBD_SPEED_LINEAR * maxSpeed;      // Tiến: +X
-  if (key === 's') vx = -KBD_SPEED_LINEAR * maxSpeed;     // Lùi: -X
-  if (key === 'a') vy = KBD_SPEED_LINEAR * maxSpeed;      // Trái: +Y
-  if (key === 'd') vy = -KBD_SPEED_LINEAR * maxSpeed;     // Phải: -Y
-  // Quay: Q trái (CCW, theta+), E phải (CW, theta-)
-  if (key === 'q') omg = KBD_ANGULAR_SPEED * maxAngular;  // Rotate Left: +theta
-  if (key === 'e') omg = -KBD_ANGULAR_SPEED * maxAngular; // Rotate Right: -theta
-        sendStep(vx, vy, omg);
-      }
-    };
-
-    const handleKeyUp = (event: KeyboardEvent) => {
-      if (!hasFocus) return;
-      const key = event.key.toLowerCase();
-      if (["w","a","s","d","q","e"].includes(key)) {
-        event.preventDefault();
-        setKeysPressed(prev => ({ ...prev, [key]: false }));
-      }
-    };
-
-    kbRef.addEventListener('focus', handleFocus);
-    kbRef.addEventListener('blur', handleBlur);
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      kbRef.removeEventListener('focus', handleFocus);
-      kbRef.removeEventListener('blur', handleBlur);
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
-  }, [sendWsCommand, throttledSendCommand, maxSpeed, maxAngular, hasFocus]);
-
-  useEffect(() => {
+    const KBD_SPEED_LINEAR = 0.3;
+    const KBD_ANGULAR_SPEED = 0.5;
+    const SEND_INTERVAL_MS = 100;
     const kbRef = keyboardControlRef.current;
     if (!kbRef) return;
 
     const handleFocus = () => setHasFocus(true);
     const handleBlur = () => {
       setHasFocus(false);
-      // Khi mất focus, reset trạng thái phím và gửi lệnh dừng
       setKeysPressed({ w: false, a: false, s: false, d: false, q: false, e: false });
-      // updateVelocities(0,0,0); // Đã được xử lý bởi useEffect trên khi keysPressed thay đổi
+      if (webSocketIsConnected && selectedRobotId) sendMotionRaw(0, 0, 0);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!hasFocus) return;
       const key = event.key.toLowerCase();
-      if (['w', 'a', 's', 'd', 'q', 'e'].includes(key)) {
+      if (["w","a","s","d","q","e"].includes(key)) {
         event.preventDefault();
+        // Cập nhật state giữ phím
         setKeysPressed(prev => ({ ...prev, [key]: true }));
+        // Gửi ngay một khung điều khiển để hỗ trợ nhấn-nhả nhanh (tap)
+        const next = { ...keysPressed, [key]: true } as KeysPressed;
+        let vx = 0, vy = 0, omg = 0;
+        if (next.w) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.s) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.a) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.d) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.q) omg += KBD_ANGULAR_SPEED * maxAngular;
+        if (next.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
+        const isAny = next.w || next.a || next.s || next.d || next.q || next.e;
+        if (isAny && webSocketIsConnected && selectedRobotId) {
+          prevVelocitiesRef.current = { x: vx, y: vy, theta: omg };
+          sendMotionRaw(vx, vy, omg);
+        }
       }
     };
     const handleKeyUp = (event: KeyboardEvent) => {
       if (!hasFocus) return;
       const key = event.key.toLowerCase();
-      if (['w', 'a', 's', 'd', 'q', 'e'].includes(key)) {
+      if (["w","a","s","d","q","e"].includes(key)) {
         event.preventDefault();
         setKeysPressed(prev => ({ ...prev, [key]: false }));
+        // Gửi ngay để dừng hoặc điều chỉnh vector khi nhả phím
+        const next = { ...keysPressed, [key]: false } as KeysPressed;
+        let vx = 0, vy = 0, omg = 0;
+        if (next.w) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.s) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.a) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.d) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.q) omg += KBD_ANGULAR_SPEED * maxAngular;
+        if (next.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
+        const isAny = next.w || next.a || next.s || next.d || next.q || next.e;
+        if (webSocketIsConnected && selectedRobotId) {
+          if (isAny) {
+            prevVelocitiesRef.current = { x: vx, y: vy, theta: omg };
+            sendMotionRaw(vx, vy, omg);
+          } else {
+            prevVelocitiesRef.current = { x: 0, y: 0, theta: 0 };
+            sendMotionRaw(0, 0, 0);
+          }
+        }
       }
     };
 
+    let intervalId: any = null;
+    const startLoop = () => {
+      if (intervalId) return;
+      intervalId = setInterval(() => {
+        if (!hasFocus || !webSocketIsConnected || !selectedRobotId) return;
+        let vx = 0, vy = 0, omg = 0;
+        if (keysPressed.w) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (keysPressed.s) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (keysPressed.a) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (keysPressed.d) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (keysPressed.q) omg += KBD_ANGULAR_SPEED * maxAngular;
+        if (keysPressed.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
+        const isAny = keysPressed.w || keysPressed.a || keysPressed.s || keysPressed.d || keysPressed.q || keysPressed.e;
+        if (isAny) {
+          prevVelocitiesRef.current = { x: vx, y: vy, theta: omg };
+          sendMotionRaw(vx, vy, omg);
+        } else {
+          const wasMoving = Math.abs(prevVelocitiesRef.current.x) > 1e-3 || Math.abs(prevVelocitiesRef.current.y) > 1e-3 || Math.abs(prevVelocitiesRef.current.theta) > 1e-3;
+          if (wasMoving) {
+            prevVelocitiesRef.current = { x: 0, y: 0, theta: 0 };
+            sendMotionRaw(0, 0, 0);
+          }
+        }
+      }, SEND_INTERVAL_MS);
+    };
+    const stopLoop = () => { if (intervalId) { clearInterval(intervalId); intervalId = null; } };
+
     kbRef.addEventListener('focus', handleFocus);
     kbRef.addEventListener('blur', handleBlur);
-    window.addEventListener('keydown', handleKeyDown); // Lắng nghe trên window để bắt phím ngay cả khi div không focus hoàn toàn
-    window.addEventListener('keyup', handleKeyUp);   // nhưng chỉ xử lý nếu hasFocus
-
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    startLoop();
     return () => {
+      stopLoop();
       kbRef.removeEventListener('focus', handleFocus);
       kbRef.removeEventListener('blur', handleBlur);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [hasFocus, updateVelocities]); // Thêm updateVelocities vào dependencies nếu nó thay đổi
+  }, [hasFocus, webSocketIsConnected, selectedRobotId, maxSpeed, maxAngular, keysPressed, sendMotionRaw]);
   // --- END: Keyboard Control Logic ---
 
   // --- START: Joystick Control Logic ---
@@ -337,9 +351,9 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
         normX = dx / joyRadius; // -1 .. 1 (right positive)
         normY = -dy / joyRadius; // -1 .. 1 (up positive)
       }
-      // Map: vx (forward/back) from vertical; vy (strafe) from horizontal
-  const vx = normY * maxSpeed;     // up -> +vx (forward)
-  const vy = -normX * maxSpeed;    // right -> -vy (strafe right)
+      // Map: vx (forward/back) from vertical; vy (strafe) from horizontal (đảo dấu theo cấu hình)
+  const vx = SIGN_X * (normY * maxSpeed);
+  const vy = SIGN_Y * (-normX * maxSpeed);
       updateVelocities(vx, vy, velocities.theta);
     };
 
@@ -579,28 +593,8 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
 
       {!compact && (
         <div className="flex-shrink-0 flex justify-between mb-4 border-b border-gray-200 dark:border-gray-700">
-          <div className="flex items-center gap-1">
-            <button 
-              onClick={() => setActiveTab('keyboard')}
-              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'keyboard' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300'}`}
-              disabled={!finalWidgetReady}
-            >
-              Keyboard
-            </button>
-            <button 
-              onClick={() => setActiveTab('joystick')}
-              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'joystick' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300'}`}
-              disabled={!finalWidgetReady}
-            >
-              Joystick
-            </button>
-            <button 
-              onClick={() => setActiveTab('motors')}
-              className={`px-3 py-2 text-sm font-medium border-b-2 ${activeTab === 'motors' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300'}`}
-              disabled={!finalWidgetReady}
-            >
-              Motors
-            </button>
+          <div className="flex items-center gap-1 text-sm px-3 py-2">
+            Điều khiển: Keyboard Only
           </div>
           <div className="flex items-center px-3 py-2 text-sm text-gray-600 dark:text-gray-300">
             Robot: {selectedRobotId || "Chưa chọn"}
@@ -668,7 +662,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
         </div>
       )}
       
-      {!compact && activeTab === 'joystick' && (
+      {!compact && !KEYBOARD_ONLY && activeTab === 'joystick' && (
         <div className={`mb-4 ${!finalWidgetReady ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''}`}>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                <div className="p-4 border rounded-lg text-center">
@@ -714,7 +708,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
         </div>
       )}
       
-      {!compact && activeTab === 'motors' && (
+      {!compact && !KEYBOARD_ONLY && activeTab === 'motors' && (
         <div className="mb-4">
             <h3 className="text-lg font-semibold mb-2">Điều Khiển Từng Động Cơ</h3>
              <div className="space-y-2">

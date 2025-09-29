@@ -415,7 +415,7 @@ def start_servers(stop_event_ref):
         output_queue.put(("System", "Port pre-clear skipped (BRIDGE_PORT_PRECLEAR disabled)."))
     # --- End of proactive port clearing ---
 
-    output_queue.put(("System", "Starting backend server (direct_bridge.py)..."))
+    output_queue.put(("System", "Starting backend server (direct_bridge.py) - RasPi gateway if configured..."))
     backend_process = run_command_gui(f"{sys.executable} direct_bridge.py", cwd=backend_dir)
     if backend_process.stdout is None or backend_process.stderr is None:
         output_queue.put(("System-ERR", "Failed to get stdout/stderr for backend process."))

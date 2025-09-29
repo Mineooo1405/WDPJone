@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     container_name: wdpjone-backend
+    # Healthcheck is baked into image; compose can still show status (starting/healthy)
     environment:
       - WS_BRIDGE_PORT=9003
       - TCP_PORT=12346
@@ -20,6 +21,7 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
       args:
+        # Build-time injection; override at build if backend on different host
         REACT_APP_WS_BRIDGE_URL: ws://localhost:9003
     container_name: wdpjone-frontend
     ports:

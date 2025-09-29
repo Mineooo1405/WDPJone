@@ -392,39 +392,42 @@ class TrajectoryCalculator:
 
 class DataLogger:
     def __init__(self, log_directory=None):
+        self.disabled = os.environ.get("DISABLE_FILE_LOG", "0").strip().lower() in ("1","true","yes")
         self.log_directory = log_directory or os.environ.get("LOG_DIRECTORY", LOG_DIRECTORY_DEFAULT)
-        os.makedirs(self.log_directory, exist_ok=True)
-        self.log_files = {} 
+        if not self.disabled:
+            os.makedirs(self.log_directory, exist_ok=True)
+        self.log_files = {}
         self.session_start_time = time.strftime('%Y%m%d_%H%M%S')
 
-    def get_log_file(self, unique_robot_key, data_type): # Changed robot_id to unique_robot_key
+    def get_log_file(self, unique_robot_key, data_type):
+        if self.disabled:
+            return
         if unique_robot_key not in self.log_files:
             self.log_files[unique_robot_key] = {}
 
-        if data_type not in self.log_files[unique_robot_key]:
-            safe_robot_key = unique_robot_key.replace(":", "_").replace(".","_") # Make it more filename friendly
-            log_filename = os.path.join(self.log_directory, f"{data_type}_{safe_robot_key}_{self.session_start_time}.txt")
-            
-            try:
-                file_handle = open(log_filename, "a") 
-                self.log_files[unique_robot_key][data_type] = file_handle
-                logger.info(f"Logging {data_type} for {unique_robot_key} to {log_filename}")
-                if os.path.getsize(log_filename) == 0:
-                    if data_type == "encoder":
-                        file_handle.write("Time RPM1 RPM2 RPM3\n")
-                    elif data_type == "bno055" or data_type == "imu":
-                        file_handle.write("Time Heading Pitch Roll W X Y Z AccelX AccelY AccelZ GravityX GravityY GravityZ\n") 
-                    elif data_type == "log" or data_type == "log_data":
-                        file_handle.write("Time Message\n")
-                    elif data_type == "position_update":
-                        file_handle.write("Time X Y Theta\n")
-                    file_handle.flush()
-            except Exception as e:
-                logger.error(f"Failed to open log file for {unique_robot_key} {data_type}: {e}")
-                return None
+        safe_robot_key = unique_robot_key.replace(":", "_").replace(".","_") # Make it more filename friendly
+        log_filename = os.path.join(self.log_directory, f"{data_type}_{safe_robot_key}_{self.session_start_time}.txt")
+        
+        try:
+            file_handle = open(log_filename, "a") 
+            self.log_files[unique_robot_key][data_type] = file_handle
+            logger.info(f"Logging {data_type} for {unique_robot_key} to {log_filename}")
+            if os.path.getsize(log_filename) == 0:
+                if data_type == "encoder":
+                    file_handle.write("Time RPM1 RPM2 RPM3\n")
+                elif data_type == "bno055" or data_type == "imu":
+                    file_handle.write("Time Heading Pitch Roll W X Y Z AccelX AccelY AccelZ GravityX GravityY GravityZ\n") 
+                elif data_type == "log" or data_type == "log_data":
+                    file_handle.write("Time Message\n")
+                elif data_type == "position_update":
+                    file_handle.write("Time X Y Theta\n")
+                file_handle.flush()
+        except Exception as e:
+            logger.error(f"Failed to open log file for {unique_robot_key} {data_type}: {e}")
+            return None
         return self.log_files[unique_robot_key].get(data_type)
 
-    def log_data(self, unique_robot_key, data_type, message_dict): # Changed robot_id to unique_robot_key
+    def log_data(self, unique_robot_key, data_type, message_dict):
         file_handle = self.get_log_file(unique_robot_key, data_type)
         if not file_handle:
             return
@@ -496,7 +499,7 @@ class DataLogger:
         except Exception as e:
             logger.error(f"Error writing to log for {unique_robot_key} {data_type}: {e}")
 
-    def close_logs(self, unique_robot_key=None): # Changed robot_id to unique_robot_key
+    def close_logs(self, unique_robot_key=None):
         if unique_robot_key:
             if unique_robot_key in self.log_files:
                 for data_type, file_handle in self.log_files[unique_robot_key].items():
@@ -518,7 +521,7 @@ log_ws = logger.getChild("WS")
 log_ota = logger.getChild("OTA")
 log_fw = logger.getChild("FWUP")
 log_traj = logger.getChild("TRAJ")
-# Initialize DataLogger with None, so it picks up from env or default
+# Initialize DataLogger (can be disabled by DISABLE_FILE_LOG=1)
 data_logger = DataLogger()
 
 
@@ -808,16 +811,181 @@ class DirectBridge:
         # Track robot type per unique robot key (e.g., "ip:port").
         # Values: "omni" or "mecanum". Default will be set on first connection.
         self.robot_type_by_key = {}
-        # Database (SQLite by default). If SQLAlchemy not installed, keep None.
-        try:
-            self.db = Database(os.environ.get("DB_URL")) if Database else None
-        except Exception as e:
-            logger.error(f"Failed to initialize Database: {e}")
-            self.db = None
+        # Database disabled per request
+        self.db = None
         self.fw_upload_mgr = FirmwareUploadManager(self.temp_firmware_dir)
         # Map and navigation
         self.grid_map = None  # {"occ": np.ndarray(bool), "resolution": float, "origin": (ox, oy), "size": (w,h)}
         self._nav_tasks = {}
+
+        # RasPi gateway mode (backend acts as client to RasPi laptop server)
+        try:
+            from back.config import settings as _settings  # type: ignore
+        except Exception:
+            try:
+                from config import settings as _settings  # type: ignore
+            except Exception:
+                _settings = None  # type: ignore
+
+        self.raspi_host = (os.environ.get("RASPI_HOST") or (_settings.raspi_host if _settings else None))
+        try:
+            self.raspi_port = int(os.environ.get("RASPI_PORT", str(_settings.raspi_port if _settings else 2004)))
+        except Exception:
+            self.raspi_port = 2004
+        self._raspi_reader = None
+        self._raspi_writer = None
+        self._raspi_seen_robot_ids = set()
+        self._raspi_ready_event = asyncio.Event()
+        self._raspi_last_firmware_path = None
+
+    async def _handle_raspi_line(self, raw_line: str):
+        """Process one newline-delimited JSON coming from RasPi laptop port.
+        Expected payloads mirror firmware's: encoder/bno055/position/log.
+        """
+        raw_line = (raw_line or "").strip()
+        if not raw_line:
+            return
+        try:
+            message_from_robot = json.loads(raw_line)
+        except Exception:
+            log_tcp.error(f"Invalid JSON from RasPi: {raw_line}")
+            return
+
+        # Determine robot identity
+        current_alias = None
+        try:
+            current_alias = str(message_from_robot.get("id") or "unknown")
+        except Exception:
+            current_alias = "unknown"
+        unique_robot_key = current_alias  # Use id as unique key in RasPi mode
+        robot_ip_address = "raspi"
+
+        # First sight of this robot id → announce to UI/DB
+        if current_alias and current_alias not in self._raspi_seen_robot_ids:
+            self._raspi_seen_robot_ids.add(current_alias)
+            try:
+                await broadcast_to_all_ui({
+                    "type": "available_robot_update",
+                    "action": "add",
+                    "robot": {
+                        "ip": robot_ip_address,
+                        "alias": current_alias,
+                        "unique_key": unique_robot_key,
+                        "status": "connected",
+                        "robot_type": self.robot_type_by_key.get(unique_robot_key, "omni"),
+                    },
+                    "timestamp": time.time()
+                })
+            except Exception:
+                pass
+            # DB disabled
+
+        try:
+            transformed_message = transform_robot_message(message_from_robot)
+            # Attach identity
+            transformed_message["robot_ip"] = robot_ip_address
+            transformed_message["robot_alias"] = current_alias
+
+            # Persist (disabled) / broadcast using the same logic as TCP path
+            msg_type = transformed_message.get("type")
+            self.data_logger.log_data(unique_robot_key, msg_type or "unknown_data", transformed_message)
+            await self.broadcast_to_subscribers(current_alias, transformed_message)
+
+            if msg_type == "encoder_data":
+                encoder_rpms_list = transformed_message.get("data")
+                message_timestamp = transformed_message.get("timestamp")
+                if encoder_rpms_list is not None and message_timestamp is not None and isinstance(encoder_rpms_list, list):
+                    if len(encoder_rpms_list) >= 4 and self.robot_type_by_key.get(unique_robot_key) != "mecanum":
+                        self.robot_type_by_key[unique_robot_key] = "mecanum"
+                        # DB disabled
+                        if getattr(self, "db", None):
+                            try:
+                                self.db.update_robot_type(unique_robot_key, "mecanum")
+                            except Exception:
+                                pass
+                    if getattr(self, "db", None):
+                        try:
+                            self.db.insert_encoder(unique_robot_key, encoder_rpms_list, message_timestamp)
+                        except Exception as e:
+                            logger.error(f"DB insert_encoder failed for {unique_robot_key}: {e}")
+                    self._latest_encoder_data[unique_robot_key] = transformed_message
+                    self.trajectory_calculator.update_encoder_data(unique_robot_key, transformed_message)
+
+            elif msg_type == "imu_data":
+                self._latest_imu_data[unique_robot_key] = transformed_message
+                # DB disabled
+                if getattr(self, "db", None):
+                    try:
+                        self.db.insert_imu(unique_robot_key, transformed_message.get("data", {}), transformed_message.get("timestamp"))
+                    except Exception as e:
+                        logger.error(f"DB insert_imu failed for {unique_robot_key}: {e}")
+
+            elif msg_type == "position_update":
+                pos_data = transformed_message.get("data", {})
+                self.trajectory_calculator.update_position_packet(unique_robot_key, pos_data)
+                # DB disabled
+                if getattr(self, "db", None):
+                    try:
+                        self.db.insert_position(unique_robot_key, float(pos_data.get("x", 0.0)), float(pos_data.get("y", 0.0)), float(pos_data.get("theta", 0.0)), transformed_message.get("timestamp"))
+                    except Exception as e:
+                        logger.error(f"DB insert_position failed for {unique_robot_key}: {e}")
+
+            elif msg_type == "log":
+                # DB disabled
+                if getattr(self, "db", None):
+                    try:
+                        message_txt = transformed_message.get("message") or transformed_message.get("data") or ""
+                        self.db.insert_log(unique_robot_key, str(message_txt), level=str(transformed_message.get("level", "INFO")), timestamp=transformed_message.get("timestamp"))
+                    except Exception as e:
+                        logger.error(f"DB insert_log failed for {unique_robot_key}: {e}")
+
+        except Exception as e:
+            log_tcp.error(f"Error processing RasPi packet: {e}")
+
+    async def _raspi_client_loop(self):
+        """Maintain a TCP client connection to RasPi laptop server and forward data."""
+        host = self.raspi_host
+        port = self.raspi_port
+        if not host:
+            return
+        log_tcp.info(f"RasPi gateway mode enabled. Connecting to {host}:{port} ...")
+        backoff = 1.0
+        while True:
+            try:
+                reader, writer = await asyncio.open_connection(host, port)
+                self._raspi_reader, self._raspi_writer = reader, writer
+                log_tcp.info(f"Connected to RasPi at {host}:{port}")
+                # Read newline-delimited JSON
+                while True:
+                    try:
+                        line = await asyncio.wait_for(reader.readline(), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if not line:
+                        log_tcp.warning("RasPi connection closed by remote.")
+                        break
+                    text = line.decode("utf-8", errors="ignore").strip()
+                    # Handle non-JSON handshake tokens from RasPi firmware flow
+                    if text.lower().find("ready") != -1:
+                        try:
+                            self._raspi_ready_event.set()
+                            log_tcp.info("RasPi signaled 'ready' for firmware update.")
+                        except Exception:
+                            pass
+                        continue
+                    await self._handle_raspi_line(text)
+            except Exception as e:
+                log_tcp.error(f"RasPi connect/error: {e}")
+            finally:
+                try:
+                    if self._raspi_writer and (not self._raspi_writer.is_closing()):
+                        self._raspi_writer.close()
+                        await self._raspi_writer.wait_closed()
+                except Exception:
+                    pass
+                self._raspi_reader, self._raspi_writer = None, None
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 10.0)
 
     # ===== Map helpers =====
     def _load_occupancy_from_image(self, b64_png: str, threshold: int = 127):
@@ -1008,7 +1176,20 @@ class DirectBridge:
         return ConnectionManager.get_robot_id_by_ip(robot_alias)
 
     async def send_text_command_by_alias(self, robot_alias: str, command_text: str) -> bool:
-        """Send a plaintext command (ensures trailing newline) to robot by alias."""
+        """Send a plaintext command to robot. If RasPi mode is enabled, forward via RasPi socket.
+        Otherwise, send to the direct TCP client mapped by alias.
+        """
+        # RasPi forwarding path
+        if getattr(self, '_raspi_writer', None) is not None:
+            try:
+                data = command_text if command_text.endswith("\n") else (command_text + "\n")
+                self._raspi_writer.write(data.encode('utf-8'))
+                await self._raspi_writer.drain()
+                return True
+            except Exception as e:
+                log_tcp.error(f"Failed sending command via RasPi: {e}")
+                # fall through to try direct path
+
         unique_key = await self.get_robot_key_from_alias(robot_alias)
         if not unique_key:
             return False
@@ -1017,19 +1198,29 @@ class DirectBridge:
             return False
         reader, writer = conn_tuple
         try:
-            # Ensure newline termination for robust parsing on device
-            if not command_text.endswith("\n"):
-                command_text = command_text + "\n"
-            writer.write(command_text.encode("utf-8"))
+            data = command_text if command_text.endswith("\n") else (command_text + "\n")
+            writer.write(data.encode("utf-8"))
             await writer.drain()
             return True
         except Exception:
             return False
 
     async def send_upgrade_command_by_alias(self, robot_alias: str, mode_override: str = None) -> bool:
-        """Try multiple upgrade command variants to maximize compatibility with firmware.
-        mode_override may be one of: 'raw' | 'newline' | 'both' to override env/default.
-        """
+        """Send Upgrade command. If RasPi is configured, forward via RasPi writer (expects RasPi firmware flow)."""
+        mode = (mode_override or os.environ.get("BRIDGE_UPGRADE_MODE", "raw")).lower()
+        payload = b"Upgrade\n" if mode == "newline" else (b"Upgrade" if mode == "raw" else b"Upgrade\n")
+
+        # RasPi path first if available
+        if getattr(self, '_raspi_writer', None) is not None:
+            try:
+                self._raspi_writer.write(payload)
+                await self._raspi_writer.drain()
+                log_tcp.info("Sent Upgrade via RasPi")
+                return True
+            except Exception as e:
+                log_tcp.error(f"Failed Upgrade via RasPi: {e}")
+
+        # Fallback to direct connection
         unique_key = await self.get_robot_key_from_alias(robot_alias)
         if not unique_key:
             return False
@@ -1038,27 +1229,12 @@ class DirectBridge:
             return False
         reader, writer = conn_tuple
         try:
-            # Choose how to send the Upgrade command based on override/env (default: raw)
-            # BRIDGE_UPGRADE_MODE: 'newline' | 'raw' | 'both'
-            mode = (mode_override or os.environ.get("BRIDGE_UPGRADE_MODE", "raw")).lower()
-            if mode == "raw":
-                writer.write(b"Upgrade")
-                await writer.drain()
-                log_tcp.info(f"Sent Upgrade (raw) to {robot_alias} ({unique_key})")
-            elif mode == "both":
-                writer.write(b"Upgrade")
-                await writer.drain()
-                await asyncio.sleep(0.05)
-                writer.write(b"Upgrade\n")
-                await writer.drain()
-                log_tcp.info(f"Sent Upgrade (raw + newline) to {robot_alias} ({unique_key})")
-            else:  # 'newline'
-                writer.write(b"Upgrade\n")
-                await writer.drain()
-                log_tcp.info(f"Sent Upgrade (newline) to {robot_alias} ({unique_key})")
+            writer.write(payload)
+            await writer.drain()
+            log_tcp.info(f"Sent Upgrade directly to {robot_alias} ({unique_key})")
             return True
         except Exception as e:
-            log_tcp.error(f"Failed to send Upgrade command to {robot_alias}: {e}")
+            log_tcp.error(f"Failed to send Upgrade to {robot_alias}: {e}")
             return False
 
     async def get_connected_robots_list(self):
@@ -1214,10 +1390,14 @@ class DirectBridge:
         else:
             logger.warning(f"Could not load and cache PID configuration from '{self.pid_config_file}'.")
 
-        self.tcp_server = await asyncio.start_server(
-            self.handle_tcp_client, '0.0.0.0', self.tcp_port
-        )
-        log_tcp.info(f"Control server started on 0.0.0.0:{self.tcp_port}")
+        # In RasPi mode, we still keep TCP server for direct robot connections (optional),
+        # and additionally start RasPi client loop if configured.
+        # Remove direct ESP server: operate only via RasPi gateway
+        if getattr(self, 'raspi_host', None):
+            asyncio.create_task(self._raspi_client_loop())
+            log_tcp.info("Direct ESP TCP server disabled. Using RasPi gateway only.")
+        else:
+            log_tcp.warning("RASPI_HOST is not configured. No robot data source is active.")
         
         # Cho phép giá trị float ("20.0") hoặc int cho ping interval/timeout
         def _as_float_env(name: str, default: float) -> float:
@@ -1303,8 +1483,7 @@ class DirectBridge:
 
         log_tcp.info(f"Processing started for {current_alias} ({unique_robot_key}).")
         
-        # Không gửi JSON ACK qua TCP cho robot. Firmware chỉ mong đợi lệnh plaintext
-        # hoặc 'registration_response' sau khi gửi gói 'registration'.
+        # Direct ESP path deprecated in RasPi-only mode
 
         # Send cached PID config if available. Optional via BRIDGE_SEND_PID_ON_CONNECT env var
         send_pid_on_connect = os.environ.get("BRIDGE_SEND_PID_ON_CONNECT", "1").strip().lower() not in ("0", "false", "no")
@@ -1345,12 +1524,7 @@ class DirectBridge:
         }
         await broadcast_to_all_ui(robot_announcement_payload)
         robot_announced_to_ui = True
-        # Upsert robot metadata in DB
-        if getattr(self, "db", None):
-            try:
-                self.db.upsert_robot(unique_robot_key, current_alias, robot_ip_address, self.robot_type_by_key.get(unique_robot_key, "omni"), "connected")
-            except Exception as e:
-                logger.error(f"DB upsert_robot failed for {unique_robot_key}: {e}")
+        # DB disabled
 
         try:
             # Giai đoạn 1: Gửi xác nhận kết nối cho Robot (đã làm ở trên)
@@ -1687,6 +1861,17 @@ class DirectBridge:
             return
 
         data_type_to_send = payload["type"]
+        # Throttle nhẹ theo (robot,type) bằng BRIDGE_BROADCAST_MIN_INTERVAL
+        try:
+            key = (robot_alias_source, data_type_to_send)
+            now_t = time.time()
+            min_dt = float(os.environ.get("BRIDGE_BROADCAST_MIN_INTERVAL", "0.05"))
+            last_t = self._last_type_tick.get(key, 0.0)
+            if (now_t - last_t) < min_dt:
+                return
+            self._last_type_tick[key] = now_t
+        except Exception:
+            pass
         message_json = json.dumps(payload)
         
         active_websockets_map = {ws.remote_address: ws for ws in ui_websockets}
@@ -2072,6 +2257,7 @@ class DirectBridge:
                                 raise RuntimeError("Firmware aggregation failed or size mismatch")
                             # Prepare OTA server to send to this IP on next OTA connection (multi-robot aware)
                             self.ota_connection.set_prepared_firmware_for_robot(target_ip, saved_path)
+                            self._raspi_last_firmware_path = saved_path
                             await websocket.send(json.dumps({
                                 "type": "firmware_prepared_for_ota",
                                 "robot_ip": target_ip,
@@ -2207,22 +2393,62 @@ class DirectBridge:
                         except Exception as e:
                             await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
                     elif command in ("upgrade", "upgrade_signal"):
-                        # Trigger OTA switch on device to connect to OTA server
+                        # RasPi firmware flow if available; else fallback to direct
                         if robot_alias:
                             mode_override = data.get("mode")
-                            ok = await self.send_upgrade_command_by_alias(robot_alias, mode_override)
-                            await websocket.send(json.dumps({
-                                "type":"ack",
-                                "command":command,
-                                "status":"success" if ok else "failed",
-                                "robot_alias": robot_alias
-                            }))
-                            await broadcast_to_all_ui({
-                                "type": "firmware_status",
-                                "status": "sent" if ok else "failed",
-                                "robot_ip": robot_alias,
-                                "message": (f"Upgrade command sent (mode={(mode_override or os.environ.get('BRIDGE_UPGRADE_MODE', 'raw')).lower()})" if ok else "Upgrade command failed")
-                            })
+                            if getattr(self, '_raspi_writer', None) is not None:
+                                try:
+                                    # 1) Send Upgrade
+                                    payload = b"Upgrade\n" if (mode_override or os.environ.get("BRIDGE_UPGRADE_MODE", "raw")).lower() == "newline" else b"Upgrade"
+                                    self._raspi_ready_event.clear()
+                                    self._raspi_writer.write(payload)
+                                    await self._raspi_writer.drain()
+                                    # 2) Wait for 'ready'
+                                    try:
+                                        await asyncio.wait_for(self._raspi_ready_event.wait(), timeout=5.0)
+                                    except asyncio.TimeoutError:
+                                        await websocket.send(json.dumps({"type":"ack","command":command,"status":"failed","robot_alias": robot_alias, "message": "Timeout waiting for 'ready' from RasPi"}))
+                                        continue
+                                    # 3) Send 'okay'
+                                    self._raspi_writer.write(b"okay")
+                                    await self._raspi_writer.drain()
+                                    # 4) Stream firmware if available
+                                    fw_path = self._raspi_last_firmware_path
+                                    if fw_path and os.path.exists(fw_path):
+                                        with open(fw_path, 'rb') as f:
+                                            while True:
+                                                chunk = f.read(1024)
+                                                if not chunk:
+                                                    break
+                                                self._raspi_writer.write(chunk)
+                                                await self._raspi_writer.drain()
+                                        self._raspi_writer.write(b"COMPLETED")
+                                        await self._raspi_writer.drain()
+                                        await websocket.send(json.dumps({"type":"ack","command":command,"status":"success","robot_alias": robot_alias}))
+                                        await broadcast_to_all_ui({
+                                            "type": "firmware_status",
+                                            "status": "sent",
+                                            "robot_ip": robot_alias,
+                                            "message": "Firmware streamed via RasPi"
+                                        })
+                                    else:
+                                        await websocket.send(json.dumps({"type":"ack","command":command,"status":"failed","robot_alias": robot_alias, "message": "No prepared firmware. Upload first."}))
+                                except Exception as e:
+                                    await websocket.send(json.dumps({"type":"ack","command":command,"status":"failed","robot_alias": robot_alias, "message": str(e)}))
+                            else:
+                                ok = await self.send_upgrade_command_by_alias(robot_alias, mode_override)
+                                await websocket.send(json.dumps({
+                                    "type":"ack",
+                                    "command":command,
+                                    "status":"success" if ok else "failed",
+                                    "robot_alias": robot_alias
+                                }))
+                                await broadcast_to_all_ui({
+                                    "type": "firmware_status",
+                                    "status": "sent" if ok else "failed",
+                                    "robot_ip": robot_alias,
+                                    "message": (f"Upgrade command sent (mode={(mode_override or os.environ.get('BRIDGE_UPGRADE_MODE', 'raw')).lower()})" if ok else "Upgrade command failed")
+                                })
                         else:
                             await websocket.send(json.dumps({"type":"error","command":command,"message":"Missing robot_alias"}))
                     elif command == "get_robot_status":

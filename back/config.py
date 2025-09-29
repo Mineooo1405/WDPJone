@@ -77,6 +77,9 @@ class Settings:
     tcp_port: int = 12346              # TCP server cho điều khiển robot
     ws_bridge_port: int = 9003         # WebSocket Bridge cho UI
     ota_port: int = 12345              # TCP cho OTA
+    # RasPi gateway (BE là client tới RasPi)
+    raspi_host: Optional[str] = None   # vd: 192.168.1.13 (nếu đặt, BE chạy ở chế độ RasPi-gateway)
+    raspi_port: int = 2004             # cổng laptop trên RasPi (Mini-Server)
     log_level: str = 'INFO'
     log_directory: str = 'logs/bridge_logs'
 
@@ -112,6 +115,8 @@ def _build_settings() -> Settings:
         tcp_port=_get_int('TCP_PORT', 12346),
         ws_bridge_port=_get_int('WS_BRIDGE_PORT', 9003),
         ota_port=_get_int('OTA_PORT', 12345),
+        raspi_host=None if _get_str('RASPI_HOST', '') == '' else _get_str('RASPI_HOST', ''),
+        raspi_port=_get_int('RASPI_PORT', 2004),
         log_level=_get_str('LOG_LEVEL', 'INFO').upper(),
         log_directory=_get_str('LOG_DIRECTORY', 'logs/bridge_logs'),
         pid_config_file=_get_str('PID_CONFIG_FILE', 'pid_config.txt'),
@@ -136,6 +141,9 @@ def _build_settings() -> Settings:
     os.environ.setdefault('TCP_PORT', str(s.tcp_port))
     os.environ.setdefault('WS_BRIDGE_PORT', str(s.ws_bridge_port))
     os.environ.setdefault('OTA_PORT', str(s.ota_port))
+    if s.raspi_host:
+        os.environ.setdefault('RASPI_HOST', s.raspi_host)
+    os.environ.setdefault('RASPI_PORT', str(s.raspi_port))
     os.environ.setdefault('LOG_LEVEL', s.log_level)
     os.environ.setdefault('LOG_DIRECTORY', s.log_directory)
     os.environ.setdefault('PID_CONFIG_FILE', s.pid_config_file)
