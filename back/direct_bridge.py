@@ -16,6 +16,7 @@ import math
 from dotenv import load_dotenv
 import base64
 import io
+import re
 # Optional heavy dependencies (used for map/occupancy features). We guard-import to avoid editor import errors if
 # the active interpreter isn't set yet. At runtime, map features will raise a clear error if these are missing.
 try:
@@ -749,7 +750,9 @@ class FirmwareUploadManager:
         self._uploads = {}      # robot_ip -> dict(info)
 
     def start(self, robot_ip, filename, filesize):
-        path = os.path.join(self.temp_dir, f"{robot_ip}_{int(time.time())}_{filename}")
+        # Sanitize robot_ip for safe Windows filenames (replace illegal chars like ':' with '_')
+        safe_prefix = re.sub(r"[^A-Za-z0-9._-]", "_", str(robot_ip or "robot"))
+        path = os.path.join(self.temp_dir, f"{safe_prefix}_{int(time.time())}_{filename}")
         f = open(path, "wb")
         self._uploads[robot_ip] = {
             "file": f,
@@ -2434,7 +2437,8 @@ class DirectBridge:
                                 try:
                                     # --- 1) Send Upgrade ---
                                     # Support modes: 'raw' -> b"Upgrade", 'newline' -> b"Upgrade\n", 'both' -> b"Upgrade\n" (line-friendly)
-                                    upgrade_mode = (mode_override or os.environ.get("BRIDGE_UPGRADE_MODE", "raw")).lower()
+                                    # Default to 'newline' to match Mini-Server line-based trigger
+                                    upgrade_mode = (mode_override or os.environ.get("BRIDGE_UPGRADE_MODE", "newline")).lower()
                                     if upgrade_mode not in ("raw", "newline", "both"):
                                         upgrade_mode = "raw"
                                     if upgrade_mode == "raw":
@@ -2463,20 +2467,66 @@ class DirectBridge:
                                         raise Exception("No firmware uploaded or file missing")
                                     total = os.path.getsize(fw_path)
                                     sent = 0
+                                    # Configurable streaming parameters
+                                    try:
+                                        # Mini-Server reads in 1024B chunks; use 1024 by default
+                                        stream_chunk_size = int(os.environ.get("BRIDGE_STREAM_CHUNK", "1024"))
+                                    except Exception:
+                                        stream_chunk_size = 1024
+                                    try:
+                                        # Slightly higher default throttle to avoid overruns on small buffers
+                                        stream_throttle_ms = float(os.environ.get("BRIDGE_STREAM_THROTTLE_MS", "4"))
+                                    except Exception:
+                                        stream_throttle_ms = 4.0
+                                    last_prog_emit = 0
                                     with open(fw_path, 'rb') as f:
                                         while True:
-                                            chunk = f.read(1024)
+                                            chunk = f.read(max(256, min(65536, stream_chunk_size)))
                                             if not chunk:
                                                 break
                                             self._raspi_writer.write(chunk)
                                             await self._raspi_writer.drain()
                                             sent += len(chunk)
+                                            # Emit progress to UI at ~5% steps or on completion
+                                            now_t = time.time()
+                                            if total > 0 and (sent == total or (sent * 100 // total) >= (last_prog_emit + 5)):
+                                                last_prog_emit = int(sent * 100 // total)
+                                                try:
+                                                    await broadcast_to_all_ui({
+                                                        "type": "ota_status",
+                                                        "robot_ip": robot_alias,
+                                                        "status": "sending",
+                                                        "message": "Streaming firmware to RasPi...",
+                                                        "progress": int(sent * 100 / total),
+                                                        "total_bytes": total,
+                                                        "sent_bytes": sent,
+                                                        "timestamp": now_t
+                                                    })
+                                                except Exception:
+                                                    pass
+                                            # Throttle a bit to avoid overrunning small TCP buffers
+                                            if stream_throttle_ms > 0:
+                                                await asyncio.sleep(stream_throttle_ms / 1000.0)
                                     log_tcp.info(f"Firmware streamed: {sent}/{total} bytes")
                                     # --- 5) Send COMPLETE token (configurable; default 'complete\n') ---
-                                    complete_token_str = os.environ.get("BRIDGE_UPGRADE_COMPLETE_TOKEN", "complete\n")
+                                    # Mini-Server searches for uppercase 'COMPLETED' substring
+                                    complete_token_str = os.environ.get("BRIDGE_UPGRADE_COMPLETE_TOKEN", "COMPLETED")
                                     complete_bytes = complete_token_str.encode('utf-8', errors='ignore')
-                                    self._raspi_writer.write(complete_bytes)
-                                    await self._raspi_writer.drain()
+                                    # Optional delay before completion to avoid token split across reads
+                                    try:
+                                        complete_delay_ms = float(os.environ.get("BRIDGE_COMPLETE_DELAY_MS", "25"))
+                                    except Exception:
+                                        complete_delay_ms = 25.0
+                                    if complete_delay_ms > 0:
+                                        await asyncio.sleep(complete_delay_ms / 1000.0)
+                                    # Try to send completion token with a tiny retry window
+                                    try:
+                                        self._raspi_writer.write(complete_bytes)
+                                        await self._raspi_writer.drain()
+                                    except Exception as _e_send_complete:
+                                        await asyncio.sleep(0.05)
+                                        self._raspi_writer.write(complete_bytes)
+                                        await self._raspi_writer.drain()
                                     log_tcp.info(f"Sent completion token to RasPi: {complete_bytes!r}. Firmware update sequence completed.")
                                     await websocket.send(json.dumps({"type":"ack","command":command,"status":"success","robot_alias": robot_alias}))
                                 except Exception as e:
