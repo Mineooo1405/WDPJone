@@ -410,9 +410,9 @@ const IMUWidget: React.FC = () => {
   const chartDataConfig = {
     labels: history.timestamps,
     datasets: activeChart === 'orientation' ? [
-      { label: 'Roll (rad)', data: history.orientation.roll, borderColor: 'rgb(255, 99, 132)', backgroundColor: 'rgba(255, 99, 132, 0.5)', tension: 0.1, pointRadius: 1 },
-      { label: 'Pitch (rad)', data: history.orientation.pitch, borderColor: 'rgb(54, 162, 235)', backgroundColor: 'rgba(54, 162, 235, 0.5)', tension: 0.1, pointRadius: 1 },
-      { label: 'Yaw (rad)', data: history.orientation.yaw, borderColor: 'rgb(75, 192, 192)', backgroundColor: 'rgba(75, 192, 192, 0.5)', tension: 0.1, pointRadius: 1 }
+      { label: 'Roll (deg)', data: history.orientation.roll, borderColor: 'rgb(255, 99, 132)', backgroundColor: 'rgba(255, 99, 132, 0.5)', tension: 0.1, pointRadius: 1 },
+      { label: 'Pitch (deg)', data: history.orientation.pitch, borderColor: 'rgb(54, 162, 235)', backgroundColor: 'rgba(54, 162, 235, 0.5)', tension: 0.1, pointRadius: 1 },
+      { label: 'Yaw (deg)', data: history.orientation.yaw, borderColor: 'rgb(75, 192, 192)', backgroundColor: 'rgba(75, 192, 192, 0.5)', tension: 0.1, pointRadius: 1 }
     ] : [
       { label: 'Quat W', data: history.quaternion.w, borderColor: 'rgb(255, 99, 132)', backgroundColor: 'rgba(255, 99, 132, 0.5)', tension: 0.1, pointRadius: 1 },
       { label: 'Quat X', data: history.quaternion.x, borderColor: 'rgb(54, 162, 235)', backgroundColor: 'rgba(54, 162, 235, 0.5)', tension: 0.1, pointRadius: 1 },
@@ -433,9 +433,10 @@ const IMUWidget: React.FC = () => {
     },
   };
 
-  const formatAngleDeg = (rad: number = 0) => {
-    let deg = rad * 180 / Math.PI;
-    deg = ((deg + 180) % 360 + 360) % 360 - 180; // normalize to [-180, 180]
+  // Input values are already degrees; normalize to [-180, 180] and format
+  const formatAngleDeg = (degIn: number = 0) => {
+    let deg = degIn;
+    deg = ((deg + 180) % 360 + 360) % 360 - 180;
     return `${deg.toFixed(1)}°`;
   };
 

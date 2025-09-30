@@ -220,7 +220,7 @@ const WidgetDataSimulator: React.FC = () => {
 
                 {/* IMU Simulator */}
                 <div style={{ marginBottom: '20px' }}>
-                    <h4 style={styles.h4}>Dữ liệu IMU (rad)</h4>
+                    <h4 style={styles.h4}>Dữ liệu IMU (deg)</h4>
                     <div style={styles.inputGroup}>
                         <label style={styles.label}>Roll: <input type="number" step="0.01" value={mockImuRoll} onChange={e => setMockImuRoll(parseFloat(e.target.value))} style={styles.input}/></label>
                         <label style={styles.label}>Pitch: <input type="number" step="0.01" value={mockImuPitch} onChange={e => setMockImuPitch(parseFloat(e.target.value))} style={styles.input}/></label>

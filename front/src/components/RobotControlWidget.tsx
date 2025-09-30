@@ -521,9 +521,9 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
                 const imuPayload = message.data as any;
                 setImuData(prev => ({ 
                 ...prev,
-                heading: imuPayload.euler?.[2] ? (imuPayload.euler[2] * 180 / Math.PI) : prev.heading, 
-                pitch: imuPayload.euler?.[1] ? (imuPayload.euler[1] * 180 / Math.PI) : prev.pitch,   
-                roll: imuPayload.euler?.[0] ? (imuPayload.euler[0] * 180 / Math.PI) : prev.roll,     
+                heading: imuPayload.euler?.[2] ?? prev.heading,
+                pitch: imuPayload.euler?.[1] ?? prev.pitch,
+                roll: imuPayload.euler?.[0] ?? prev.roll,
                 calibrated: prev.calibrated 
                 }));
             }
