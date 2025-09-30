@@ -70,6 +70,11 @@ function sanitizeQuat(arr: any): [number,number,number,number] {
   ];
 }
 
+function sanitizeVec3(arr: any): [number,number,number] {
+  if (!Array.isArray(arr)) return [0,0,0];
+  return [safeNum(arr[0]), safeNum(arr[1]), safeNum(arr[2])];
+}
+
 // Standardized IMU data structure expected from WebSocket (reinserted after sanitization helpers)
 interface ImuData {
   roll: number;
@@ -79,187 +84,16 @@ interface ImuData {
   quat_x: number;
   quat_y: number;
   quat_z: number;
+  lin_accel: [number,number,number];
+  gravity: [number,number,number];
+  gyro_raw: [number,number,number];
+  status?: string;
   timestamp: number;
   robot_ip: string;
   robot_alias: string;
   calibrated: boolean;
 }
 
-// Replace the current SimpleCompassVisualizer with this simpler YPR visualization
-const SimpleYPRVisualizer: React.FC<{ roll: number; pitch: number; yaw: number }> = ({ roll, pitch, yaw }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    
-    const width = canvas.width;
-    const height = canvas.height;
-    const centerX = width / 2;
-    const centerY = height / 2 - 20; // Adjusted centerY slightly more
-    const scale = Math.min(width, height) * 0.28; // Slightly reduced scale for more padding
-
-    // --- Matrix Math Utilities ---
-    const multiplyMatrixAndPoint = (matrix: number[][], point: number[]): number[] => {
-      const result = [0, 0, 0];
-      for (let i = 0; i < 3; i++) {
-        for (let j = 0; j < 3; j++) {
-          result[i] += matrix[i][j] * point[j];
-        }
-      }
-      return result;
-    };
-
-    const rotationXMatrix = (angle: number): number[][] => [
-      [1, 0, 0],
-      [0, Math.cos(angle), -Math.sin(angle)],
-      [0, Math.sin(angle), Math.cos(angle)],
-    ];
-
-    const rotationYMatrix = (angle: number): number[][] => [
-      [Math.cos(angle), 0, Math.sin(angle)],
-      [0, 1, 0],
-      [-Math.sin(angle), 0, Math.cos(angle)],
-    ];
-
-    const rotationZMatrix = (angle: number): number[][] => [
-      [Math.cos(angle), -Math.sin(angle), 0],
-      [Math.sin(angle), Math.cos(angle), 0],
-      [0, 0, 1],
-    ];
-    
-    const multiplyMatrices = (m1: number[][], m2: number[][]): number[][] => {
-        const result: number[][] = [[0,0,0],[0,0,0],[0,0,0]];
-        for (let i = 0; i < 3; i++) {
-            for (let j = 0; j < 3; j++) {
-                for (let k = 0; k < 3; k++) {
-                    result[i][j] += m1[i][k] * m2[k][j];
-                }
-            }
-        }
-        return result;
-    };
-
-    // --- Cube Definition ---
-    const points: number[][] = [
-      [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
-      [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
-    ];
-
-    const lines: [number, number][] = [
-      [0, 1], [1, 2], [2, 3], [3, 0],
-      [4, 5], [5, 6], [6, 7], [7, 4],
-      [0, 4], [1, 5], [2, 6], [3, 7],
-    ];
-    
-    // Axes points (origin, X_end, Y_end, Z_end)
-    const axisPoints: number[][] = [
-        [0,0,0], // Origin
-        [1.5,0,0], // X axis end
-        [0,1.5,0], // Y axis end
-        [0,0,1.5]  // Z axis end
-    ];
-
-    // --- Drawing Logic ---
-    ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = '#f4f4f8'; // Slightly different light grey background
-    ctx.fillRect(0, 0, width, height);
-
-    // Initial view rotation to make all axes visible at rest
-    const initialViewRotX = rotationXMatrix(Math.PI / 8); // Rotate slightly around X
-    const initialViewRotY = rotationYMatrix(-Math.PI / 8); // Rotate slightly around Y
-    let initialViewTransform = multiplyMatrices(initialViewRotY, initialViewRotX);
-
-    // IMU rotation matrices
-    const Rz_imu = rotationZMatrix(yaw);    // Yaw around Z
-    const Ry_imu = rotationYMatrix(pitch);  // Pitch around Y
-    const Rx_imu = rotationXMatrix(roll);   // Roll around X
-
-    // Combined IMU rotation: R_imu = Rz * Ry * Rx
-    let R_imu = multiplyMatrices(Rz_imu, Ry_imu);
-    R_imu = multiplyMatrices(R_imu, Rx_imu);
-    
-    // Final transform: Apply IMU rotation then initial view transform
-    // This means the object rotates in its own frame, then the whole scene is viewed from a slight angle.
-    // Alternative: R_final = multiplyMatrices(initialViewTransform, R_imu); // View transformation first
-    let R_final = multiplyMatrices(initialViewTransform, R_imu); 
-
-    const projectedPoints: { x: number; y: number; z: number }[] = [];
-      
-    // Rotate and project cube points
-    points.forEach(point => {
-      const rotated = multiplyMatrixAndPoint(R_final, point);
-      projectedPoints.push({
-        x: rotated[0] * scale + centerX,
-        y: rotated[1] * scale + centerY,
-        z: rotated[2] * scale, // For potential depth sorting or effects
-      });
-    });
-    
-    // Rotate and project axis points
-    const projectedAxisPoints: { x: number; y: number; z: number }[] = [];
-    axisPoints.forEach(point => {
-        const bodyRotated = multiplyMatrixAndPoint(R_imu, point);
-        const finalRotated = multiplyMatrixAndPoint(initialViewTransform, bodyRotated);
-        projectedAxisPoints.push({
-            x: finalRotated[0] * scale + centerX,
-            y: finalRotated[1] * scale + centerY,
-            z: finalRotated[2] * scale,
-        });
-    });
-
-    // Draw cube lines (thicker, slightly darker blue)
-    ctx.strokeStyle = '#2980b9'; 
-    ctx.lineWidth = 2;
-    lines.forEach(line => {
-      const p1 = projectedPoints[line[0]];
-      const p2 = projectedPoints[line[1]];
-    ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
-    ctx.stroke();
-    });
-    
-    // Draw Axes
-    const axisColors = ['#c0392b', '#27ae60', '#2980b9']; // Darker Red, Green, Blue
-    const axisLabels = ['R', 'P', 'Y']; // For Roll (X), Pitch (Y), Yaw (Z) axes of the body
-    const originScreen = projectedAxisPoints[0];
-
-    for (let i = 0; i < 3; i++) {
-        const axisEndScreen = projectedAxisPoints[i+1];
-      ctx.beginPath();
-        ctx.moveTo(originScreen.x, originScreen.y);
-        ctx.lineTo(axisEndScreen.x, axisEndScreen.y);
-        ctx.strokeStyle = axisColors[i];
-        ctx.lineWidth = 3; // Thicker axes
-      ctx.stroke();
-      
-        ctx.fillStyle = axisColors[i];
-        ctx.font = 'bold 13px Arial';
-        const labelOffsetX = (axisEndScreen.x - originScreen.x) * 0.15; // Push labels out a bit more
-        const labelOffsetY = (axisEndScreen.y - originScreen.y) * 0.15;
-        // Draw label near the tip of the axis arrow
-        ctx.fillText(axisLabels[i], axisEndScreen.x + labelOffsetX - (axisLabels[i].length > 1 ? 5 : 0), axisEndScreen.y + labelOffsetY + 5);
-    }
-    
-    ctx.beginPath();
-    ctx.arc(originScreen.x, originScreen.y, 4, 0, Math.PI * 2); // Slightly larger origin dot
-    ctx.fillStyle = '#2c3e50'; // Dark grey for origin
-    ctx.fill();
-
-  }, [roll, pitch, yaw]); // Removed width, height as they are read once initially
-
-  return (
-    <canvas
-      ref={canvasRef}
-      width={280}
-      height={280}
-      className="w-full h-full bg-gray-100 rounded-md shadow-inner border border-gray-300"
-    />
-  );
-};
 
 const IMUWidget: React.FC = () => {
   const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState, getIncomingForRobot } = useRobotContext() as any;
@@ -391,6 +225,10 @@ const IMUWidget: React.FC = () => {
         // Sanitize arrays first
         const rawEuler = sanitizeEuler(imuPayload.euler);
         const rawQuat = sanitizeQuat(imuPayload.quaternion);
+        const linAccel = sanitizeVec3(imuPayload.lin_accel);
+        const grav = sanitizeVec3(imuPayload.gravity);
+        const gyro = sanitizeVec3(imuPayload.gyro_raw);
+        const status: string | undefined = typeof imuPayload.status === 'string' && imuPayload.status.trim() !== '' ? imuPayload.status : undefined;
 
         // Prefer [yaw, pitch, roll] ordering (sim + backend yaw index default), fallback gracefully
         const yawVal = typeof rawEuler[0] === 'number' ? rawEuler[0] : (typeof rawEuler[2] === 'number' ? rawEuler[2] : 0);
@@ -404,7 +242,11 @@ const IMUWidget: React.FC = () => {
           quat_x: rawQuat[1],
             quat_y: rawQuat[2],
           quat_z: rawQuat[3],
-          timestamp: message.timestamp || Date.now() / 1000, // Timestamp from the outer message
+          lin_accel: linAccel,
+          gravity: grav,
+          gyro_raw: gyro,
+          status,
+          timestamp: (typeof imuPayload.time === 'number' ? imuPayload.time : (message.timestamp || Date.now() / 1000)), // Prefer inner time if present
           robot_ip: message.robot_ip, 
           robot_alias: message.robot_alias,
           calibrated: currentImuData?.calibrated ?? false 
@@ -661,6 +503,24 @@ const IMUWidget: React.FC = () => {
                 <div className="p-1.5 bg-gray-600 rounded"><div className="opacity-70">X</div><div>{currentImuData?.quat_x?.toFixed(3) || '0.000'}</div></div>
                 <div className="p-1.5 bg-gray-600 rounded"><div className="opacity-70">Y</div><div>{currentImuData?.quat_y?.toFixed(3) || '0.000'}</div></div>
                 <div className="p-1.5 bg-gray-600 rounded"><div className="opacity-70">Z</div><div>{currentImuData?.quat_z?.toFixed(3) || '0.000'}</div></div>
+                </div>
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="p-2 bg-gray-600 rounded">
+                    <div className="opacity-70 mb-1">Linear Accel (m/s²)</div>
+                    <div className="text-center">[{currentImuData?.lin_accel?.map(v=>v.toFixed(2)).join(', ') || '0.00, 0.00, 0.00'}]</div>
+                  </div>
+                  <div className="p-2 bg-gray-600 rounded">
+                    <div className="opacity-70 mb-1">Gravity (m/s²)</div>
+                    <div className="text-center">[{currentImuData?.gravity?.map(v=>v.toFixed(2)).join(', ') || '0.00, 0.00, 0.00'}]</div>
+                  </div>
+                  <div className="p-2 bg-gray-600 rounded">
+                    <div className="opacity-70 mb-1">Gyro Raw (rad/s)</div>
+                    <div className="text-center">[{currentImuData?.gyro_raw?.map(v=>v.toFixed(3)).join(', ') || '0.000, 0.000, 0.000'}]</div>
+                  </div>
+                  <div className="p-2 bg-gray-600 rounded">
+                    <div className="opacity-70 mb-1">Status</div>
+                    <div className="text-center">{currentImuData?.status || 'N/A'}</div>
+                  </div>
                 </div>
                 </div>
             <div className="text-xs text-gray-400 text-center pt-1">

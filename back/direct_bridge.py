@@ -470,12 +470,22 @@ class DataLogger:
                     quat_y = src.get("quat_y", 0.0)
                     quat_z = src.get("quat_z", 0.0)
 
-                accel = src.get("accel") if isinstance(src.get("accel"), (list, tuple)) else [src.get("lin_accel_x", 0.0), src.get("lin_accel_y", 0.0), src.get("lin_accel_z", 0.0)]
-                ax, ay, az = (accel + [0.0, 0.0, 0.0])[:3]
+                # Prefer new array fields when present
+                accel_arr = src.get("lin_accel") if isinstance(src.get("lin_accel"), (list, tuple)) else src.get("accel")
+                if isinstance(accel_arr, (list, tuple)):
+                    ax, ay, az = (list(accel_arr) + [0.0,0.0,0.0])[:3]
+                else:
+                    ax = src.get("lin_accel_x", 0.0)
+                    ay = src.get("lin_accel_y", 0.0)
+                    az = src.get("lin_accel_z", 0.0)
 
-                gx = src.get("gravity_x", 0.0)
-                gy = src.get("gravity_y", 0.0)
-                gz = src.get("gravity_z", 0.0)
+                grav_arr = src.get("gravity") if isinstance(src.get("gravity"), (list, tuple)) else None
+                if isinstance(grav_arr, (list, tuple)):
+                    gx, gy, gz = (list(grav_arr) + [0.0,0.0,0.0])[:3]
+                else:
+                    gx = src.get("gravity_x", 0.0)
+                    gy = src.get("gravity_y", 0.0)
+                    gz = src.get("gravity_z", 0.0)
 
                 log_line = f"{log_timestamp:.3f} {heading:.2f} {pitch:.2f} {roll:.2f} {quat_w:.4f} {quat_x:.4f} {quat_y:.4f} {quat_z:.4f} {ax:.2f} {ay:.2f} {az:.2f} {gx:.2f} {gy:.2f} {gz:.2f}\n"
 
@@ -2453,7 +2463,7 @@ class DirectBridge:
                                             sent += len(chunk)
                                     log_tcp.info(f"Firmware streamed: {sent}/{total} bytes")
                                     # 5) Send COMPLETED
-                                    self._raspi_writer.write(b"COMPLETED\n")
+                                    self._raspi_writer.write(b"COMPLETED")
                                     await self._raspi_writer.drain()
                                     log_tcp.info("Firmware update sequence completed.")
                                     await websocket.send(json.dumps({"type":"ack","command":command,"status":"success","robot_alias": robot_alias}))
@@ -2601,11 +2611,51 @@ def transform_robot_message(message_dict: dict) -> dict:
             quat = [w, x, y, z]
         else:
             quat = [_num(src.get("quat_w", 1.0), 1.0), _num(src.get("quat_x", 0.0)), _num(src.get("quat_y", 0.0)), _num(src.get("quat_z", 0.0))]
+        # Additional optional vectors: linear acceleration, gravity, gyro raw; plus status
+        def _vec3(obj, key_list, default=(0.0,0.0,0.0)):
+            # Try array key first (e.g., lin_accel), then fall back to individual axis keys
+            for k in key_list:
+                if isinstance(obj.get(k), (list, tuple)):
+                    return _list_num(obj.get(k), 3, 0.0)
+            # axis-key fallback maps
+            axis_map = {
+                "lin_accel": ("lin_accel_x","lin_accel_y","lin_accel_z"),
+                "gravity": ("gravity_x","gravity_y","gravity_z"),
+                "gyro_raw": ("gyro_x","gyro_y","gyro_z"),
+            }
+            # Use the first name as canonical for axis lookup
+            canonical = key_list[0] if key_list else None
+            if canonical and canonical in axis_map:
+                ax, ay, az = axis_map[canonical]
+                return [
+                    _num(obj.get(ax, default[0])),
+                    _num(obj.get(ay, default[1])),
+                    _num(obj.get(az, default[2]))
+                ]
+            return list(default)
+
+        lin_accel = _vec3(src, ["lin_accel"])
+        gravity = _vec3(src, ["gravity"])
+        gyro_raw = _vec3(src, ["gyro_raw"])
+        status_raw = src.get("status")
+        status = None
+        if isinstance(status_raw, str):
+            s = status_raw.strip()
+            status = s if s else None
+
         transformed_payload["data"] = {
             "time": src.get("time", transformed_payload["timestamp"]),
             "euler": euler,
             "quaternion": quat,
+            # Extended fields
+            "lin_accel": lin_accel,
+            "gravity": gravity,
+            "gyro_raw": gyro_raw,
         }
+        # Backward-compat for logger expecting 'accel'
+        transformed_payload["data"]["accel"] = lin_accel
+        if status is not None:
+            transformed_payload["data"]["status"] = status
         if robot_reported_id:
             transformed_payload["data"]["robot_reported_id"] = robot_reported_id
 
@@ -2631,31 +2681,58 @@ def transform_robot_message(message_dict: dict) -> dict:
         if robot_reported_id:
             transformed_payload["robot_reported_id"] = robot_reported_id
 
-    # 3) Position data (ESP32 sends type: "position"). Allow empty/partial arrays.
+    # 3) Position data (Robot sends type: "position"). 
+    # New format: {"id":"robot1", "type":"position", "source":"ekf", "data":{"position":[x, y, vx, vy, theta]}}
     elif original_type == "position":
         transformed_payload["type"] = "position_update"
         src = message_dict.get("data")
         if not isinstance(src, dict):
             src = {}
+        
+        # Store source info (ekf, bno055, localization, etc.)
+        source = message_dict.get("source", "unknown")
+        transformed_payload["source"] = source
+        
         pos_arr = src.get("position")
-        x, y, theta_rad = 0.0, 0.0, 0.0
-        if isinstance(pos_arr, (list, tuple)) and len(pos_arr) >= 3:
+        x, y, vx, vy, theta_rad = 0.0, 0.0, 0.0, 0.0, 0.0
+        
+        # New format: position array with 5 elements [x, y, vx, vy, theta]
+        if isinstance(pos_arr, (list, tuple)) and len(pos_arr) >= 5:
+            x = _num(pos_arr[0], 0.0)
+            y = _num(pos_arr[1], 0.0)
+            vx = _num(pos_arr[2], 0.0)
+            vy = _num(pos_arr[3], 0.0)
+            theta_rad = _num(pos_arr[4], 0.0)  # Assume already in radians
+            
+        # Legacy fallback: position array with 3 elements [x, y, theta_deg]
+        elif isinstance(pos_arr, (list, tuple)) and len(pos_arr) >= 3:
             x = _num(pos_arr[0], 0.0)
             y = _num(pos_arr[1], 0.0)
             theta_deg = _num(pos_arr[2], 0.0)
             theta_rad = theta_deg * math.pi / 180.0
+            # vx, vy remain 0.0
+            
+        # Legacy fallback: flat dict keys {x, y, theta}
         else:
-            # Accept flat keys x,y,theta (deg) if provided
             if not isinstance(pos_arr, (list, tuple)):
                 x = _num(src.get("x", 0.0))
                 y = _num(src.get("y", 0.0))
+                vx = _num(src.get("vx", 0.0))
+                vy = _num(src.get("vy", 0.0))
                 # theta may be in degrees or radians; we assume degrees when magnitude > 2π*2
                 theta_val = _num(src.get("theta", src.get("heading", 0.0)), 0.0)
                 if abs(theta_val) > 6.28318 * 2:  # very likely degrees
                     theta_rad = theta_val * math.pi / 180.0
                 else:
                     theta_rad = theta_val
-        transformed_payload["data"] = {"x": x, "y": y, "theta": theta_rad}
+        
+        transformed_payload["data"] = {
+            "x": x, 
+            "y": y, 
+            "theta": theta_rad,
+            "vx": vx,
+            "vy": vy
+        }
         if any(_is_na(v) for v in [src.get("x"), src.get("y"), src.get("theta"), src.get("heading")]):
             transformed_payload["position_note"] = "one_or_more_fields_missing_or_na"
         if robot_reported_id:
