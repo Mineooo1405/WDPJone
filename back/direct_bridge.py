@@ -2427,25 +2427,35 @@ class DirectBridge:
                         except Exception as e:
                             await websocket.send(json.dumps({"type":"firmware_upload_ack","status":"error","message":str(e)}))
                     elif command in ("upgrade", "upgrade_signal"):
-                        # RasPi firmware flow: send Upgrade, wait ready, send okay+firmware+COMPLETED
+                        # RasPi firmware flow: send Upgrade, wait 'ready', then send OK + stream firmware + COMPLETE token
                         if robot_alias:
                             mode_override = data.get("mode")
                             if getattr(self, '_raspi_writer', None) is not None:
                                 try:
-                                    # 1) Send Upgrade
-                                    payload = b"Upgrade\n" if (mode_override or os.environ.get("BRIDGE_UPGRADE_MODE", "raw")).lower() == "newline" else b"Upgrade"
+                                    # --- 1) Send Upgrade ---
+                                    # Support modes: 'raw' -> b"Upgrade", 'newline' -> b"Upgrade\n", 'both' -> b"Upgrade\n" (line-friendly)
+                                    upgrade_mode = (mode_override or os.environ.get("BRIDGE_UPGRADE_MODE", "raw")).lower()
+                                    if upgrade_mode not in ("raw", "newline", "both"):
+                                        upgrade_mode = "raw"
+                                    if upgrade_mode == "raw":
+                                        payload = b"Upgrade"
+                                    else:
+                                        # For 'newline' and 'both', prefer newline-terminated to satisfy line-based parsers
+                                        payload = b"Upgrade\n"
                                     self._raspi_ready_event.clear()
                                     self._raspi_writer.write(payload)
                                     await self._raspi_writer.drain()
-                                    log_tcp.info("Sent Upgrade to RasPi, waiting for 'ready'...")
+                                    log_tcp.info(f"Sent Upgrade to RasPi (mode={upgrade_mode!r}, bytes={payload!r}), waiting for 'ready'...")
                                     # 2) Wait for 'ready' (with timeout)
                                     try:
                                         await asyncio.wait_for(self._raspi_ready_event.wait(), timeout=10.0)
                                     except asyncio.TimeoutError:
                                         raise Exception("Timeout waiting for RasPi 'ready' signal")
-                                    log_tcp.info("RasPi ready. Sending 'okay' and firmware...")
-                                    # 3) Send 'okay'
-                                    self._raspi_writer.write(b"okay\n")
+                                    log_tcp.info("RasPi ready. Sending 'OK' and firmware stream...")
+                                    # --- 3) Send OK token (configurable, default 'okay\n') ---
+                                    ok_token_str = os.environ.get("BRIDGE_OK_TOKEN", "okay\n")
+                                    ok_bytes = ok_token_str.encode('utf-8', errors='ignore')
+                                    self._raspi_writer.write(ok_bytes)
                                     await self._raspi_writer.drain()
                                     # 4) Stream firmware
                                     fw_path = getattr(self, '_raspi_last_firmware_path', None)
@@ -2462,10 +2472,12 @@ class DirectBridge:
                                             await self._raspi_writer.drain()
                                             sent += len(chunk)
                                     log_tcp.info(f"Firmware streamed: {sent}/{total} bytes")
-                                    # 5) Send COMPLETED
-                                    self._raspi_writer.write(b"COMPLETED")
+                                    # --- 5) Send COMPLETE token (configurable; default 'complete\n') ---
+                                    complete_token_str = os.environ.get("BRIDGE_UPGRADE_COMPLETE_TOKEN", "complete\n")
+                                    complete_bytes = complete_token_str.encode('utf-8', errors='ignore')
+                                    self._raspi_writer.write(complete_bytes)
                                     await self._raspi_writer.drain()
-                                    log_tcp.info("Firmware update sequence completed.")
+                                    log_tcp.info(f"Sent completion token to RasPi: {complete_bytes!r}. Firmware update sequence completed.")
                                     await websocket.send(json.dumps({"type":"ack","command":command,"status":"success","robot_alias": robot_alias}))
                                 except Exception as e:
                                     log_tcp.error(f"Upgrade flow error: {e}")
