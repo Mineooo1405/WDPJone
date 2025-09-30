@@ -79,7 +79,8 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
   const [rpmValues, setRpmValues] = useState<RPMData>({1: 0, 2: 0, 3: 0});
   const [errorMessage, setErrorMessage] = useState<string>("");
   // Removed unused statusMessage state
-  const [activeTab, setActiveTab] = useState<'joystick' | 'motors' | 'keyboard'>(compact ? 'keyboard' : 'keyboard');
+  // Tab cố định: chỉ dùng keyboard
+  const [activeTab] = useState<'joystick' | 'motors' | 'keyboard'>('keyboard');
   const [velocities, setVelocities] = useState({ x: 0, y: 0, theta: 0 });
   const [maxSpeed] = useState(1.0); 
   const [maxAngular] = useState(2.0); 
@@ -88,9 +89,9 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
   const [commandSending, setCommandSending] = useState(false);
   const [imuData, setImuData] = useState<ImuData>({ heading: 0, pitch: 0, roll: 0, calibrated: false });
   const [robotPosition, setRobotPosition] = useState<PositionData>({ x: 0, y: 0, theta: 0 });
-  // Đảo chiều trục X/Y theo yêu cầu
-  const SIGN_X = -1;
-  const SIGN_Y = -1;
+  // Định nghĩa chiều chuẩn: W tiến (x+), D phải (y+)
+  const SIGN_X = 1;
+  const SIGN_Y = 1;
   // Chế độ chỉ dùng bàn phím
   const KEYBOARD_ONLY = true;
   
@@ -185,7 +186,7 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
 
   // Emergency stop removed per request
 
-  // --- START: Keyboard Control Logic (continuous) ---
+  // --- START: Keyboard Control Logic (continuous, global without focus) ---
   useEffect(() => {
     const KBD_SPEED_LINEAR = 0.3;
     const KBD_ANGULAR_SPEED = 0.5;
@@ -200,7 +201,11 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       if (webSocketIsConnected && selectedRobotId) sendMotionRaw(0, 0, 0);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!hasFocus) return;
+      // Cho phép điều khiển toàn cục; bỏ qua khi đang gõ trong input/textarea/select hoặc contentEditable
+      const tgt: any = event.target as any;
+      const tag = (tgt && tgt.tagName ? String(tgt.tagName).toLowerCase() : "");
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (tgt && tgt.isContentEditable)) return;
+      if (!webSocketIsConnected || !selectedRobotId) return;
       const key = event.key.toLowerCase();
       if (["w","a","s","d","q","e"].includes(key)) {
         event.preventDefault();
@@ -209,10 +214,11 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
         // Gửi ngay một khung điều khiển để hỗ trợ nhấn-nhả nhanh (tap)
         const next = { ...keysPressed, [key]: true } as KeysPressed;
         let vx = 0, vy = 0, omg = 0;
-        if (next.w) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.s) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.a) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.d) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        // W/S điều khiển tiến/lùi trên trục dot_y, A/D điều khiển trái/phải trên trục dot_x
+        if (next.w) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.s) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.a) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.d) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
         if (next.q) omg += KBD_ANGULAR_SPEED * maxAngular;
         if (next.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
         const isAny = next.w || next.a || next.s || next.d || next.q || next.e;
@@ -223,7 +229,10 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       }
     };
     const handleKeyUp = (event: KeyboardEvent) => {
-      if (!hasFocus) return;
+      const tgt: any = event.target as any;
+      const tag = (tgt && tgt.tagName ? String(tgt.tagName).toLowerCase() : "");
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (tgt && tgt.isContentEditable)) return;
+      if (!webSocketIsConnected || !selectedRobotId) return;
       const key = event.key.toLowerCase();
       if (["w","a","s","d","q","e"].includes(key)) {
         event.preventDefault();
@@ -231,10 +240,10 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
         // Gửi ngay để dừng hoặc điều chỉnh vector khi nhả phím
         const next = { ...keysPressed, [key]: false } as KeysPressed;
         let vx = 0, vy = 0, omg = 0;
-        if (next.w) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.s) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.a) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.d) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.w) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.s) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.a) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (next.d) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
         if (next.q) omg += KBD_ANGULAR_SPEED * maxAngular;
         if (next.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
         const isAny = next.w || next.a || next.s || next.d || next.q || next.e;
@@ -254,12 +263,12 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
     const startLoop = () => {
       if (intervalId) return;
       intervalId = setInterval(() => {
-        if (!hasFocus || !webSocketIsConnected || !selectedRobotId) return;
+        if (!webSocketIsConnected || !selectedRobotId) return;
         let vx = 0, vy = 0, omg = 0;
-        if (keysPressed.w) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (keysPressed.s) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (keysPressed.a) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (keysPressed.d) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (keysPressed.w) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (keysPressed.s) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
+        if (keysPressed.a) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
+        if (keysPressed.d) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
         if (keysPressed.q) omg += KBD_ANGULAR_SPEED * maxAngular;
         if (keysPressed.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
         const isAny = keysPressed.w || keysPressed.a || keysPressed.s || keysPressed.d || keysPressed.q || keysPressed.e;

@@ -10,6 +10,7 @@ node_modules/
 # Bỏ qua thư mục build
 dist/
 build/
+PaperProject/
 
 # Bỏ qua các tệp cấu hình môi trường
 .env

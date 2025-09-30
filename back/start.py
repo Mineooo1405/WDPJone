@@ -68,6 +68,10 @@ class AppGUI:
         self.frontend_output_text.grid(row=1, column=1, sticky=N+S+E+W, padx=(2,0))
         self.frontend_output_text.configure(state='disabled')
 
+        # Configure colored log tags
+        self._init_tags(self.backend_output_text)
+        self._init_tags(self.frontend_output_text)
+
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing_thread)
         self.check_output_queue()
 
@@ -86,10 +90,54 @@ class AppGUI:
             widget = self.backend_output_text
             line = f"[{process_name}] {line}"
 
+        tag = self._classify_line(process_name, line)
         widget.configure(state='normal')
-        widget.insert(END, line + "\n")
+        if tag:
+            widget.insert(END, line + "\n", tag)
+        else:
+            widget.insert(END, line + "\n")
         widget.configure(state='disabled')
         widget.see(END)
+
+    def _init_tags(self, text_widget: scrolledtext.ScrolledText) -> None:
+        try:
+            # Severity
+            text_widget.tag_config('log_error', foreground='#ff4d4d')
+            text_widget.tag_config('log_warn', foreground='#ffd24d')
+            # Channels
+            text_widget.tag_config('log_encoder', foreground='#00cc66')
+            text_widget.tag_config('log_imu', foreground='#00bfff')
+            text_widget.tag_config('log_fw', foreground='#ff9900')
+            text_widget.tag_config('log_tcp', foreground='#40c4ff')
+            text_widget.tag_config('log_ws', foreground='#b388ff')
+            text_widget.tag_config('log_ota', foreground='#ffb74d')
+            text_widget.tag_config('log_system', foreground='#cfcfcf')
+        except Exception:
+            pass
+
+    def _classify_line(self, process_name: str, line: str) -> str:
+        s = (line or "").lower()
+        # Severity first
+        if 'error' in s or 'exception' in s or process_name.endswith('-ERR'):
+            return 'log_error'
+        if 'warning' in s or process_name.endswith('-WARN'):
+            return 'log_warn'
+        # Channels/types
+        if 'encoder_data' in s or ('encoder' in s and ('rx ok' in s or 'rpm' in s)):
+            return 'log_encoder'
+        if 'imu_data' in s or 'bno055' in s or ('imu' in s and 'rx ok' in s):
+            return 'log_imu'
+        if 'fw-up' in s or 'firmware' in s or 'ota' in s:
+            return 'log_fw'
+        if 'directbridge.ws' in s or ' websockets' in s or ' ws ' in s:
+            return 'log_ws'
+        if 'directbridge.tcp' in s or 'raspi' in s or ' tcp ' in s:
+            return 'log_tcp'
+        if 'directbridge.ota' in s:
+            return 'log_ota'
+        if process_name.startswith('System'):
+            return 'log_system'
+        return ''
 
     def check_output_queue(self):
         try:
@@ -313,11 +361,20 @@ def _parse_backend_env(backend_dir: Path):
         tcp_port = settings.tcp_port
         ota_port = settings.ota_port
         api_port = DEFAULT_API_PORT
+        raspi_host = settings.raspi_host or ""
+        raspi_port = settings.raspi_port
     except Exception:
         ws_port = DEFAULT_WS_BRIDGE_PORT
         tcp_port = DIRECT_BRIDGE_TCP_PORT
         ota_port = DIRECT_BRIDGE_OTA_PORT
         api_port = DEFAULT_API_PORT
+        raspi_host = ""
+        raspi_port = 2004
+    # Optional stability envs
+    disable_file_log = os.environ.get("DISABLE_FILE_LOG", "1")
+    broadcast_min_interval = os.environ.get("BRIDGE_BROADCAST_MIN_INTERVAL", "0.05")
+    ws_ping_interval = os.environ.get("WS_PING_INTERVAL", "20")
+    ws_ping_timeout = os.environ.get("WS_PING_TIMEOUT", "20")
     api_port = DEFAULT_API_PORT
     try:
         env_file = backend_dir / "env_config.txt"
@@ -343,6 +400,19 @@ def _parse_backend_env(backend_dir: Path):
                         elif key == 'API_PORT':
                             try: api_port = int(val)
                             except: pass
+                        elif key == 'RASPI_HOST':
+                            raspi_host = val
+                        elif key == 'RASPI_PORT':
+                            try: raspi_port = int(val)
+                            except: pass
+                        elif key == 'DISABLE_FILE_LOG':
+                            disable_file_log = val
+                        elif key == 'BRIDGE_BROADCAST_MIN_INTERVAL':
+                            broadcast_min_interval = val
+                        elif key == 'WS_PING_INTERVAL':
+                            ws_ping_interval = val
+                        elif key == 'WS_PING_TIMEOUT':
+                            ws_ping_timeout = val
     except Exception:
         pass
     return {
@@ -350,6 +420,12 @@ def _parse_backend_env(backend_dir: Path):
         'TCP_PORT': tcp_port,
         'OTA_PORT': ota_port,
         'API_PORT': api_port,
+        'RASPI_HOST': raspi_host,
+        'RASPI_PORT': raspi_port,
+        'DISABLE_FILE_LOG': disable_file_log,
+        'BRIDGE_BROADCAST_MIN_INTERVAL': broadcast_min_interval,
+        'WS_PING_INTERVAL': ws_ping_interval,
+        'WS_PING_TIMEOUT': ws_ping_timeout,
     }
 
 def check_and_create_frontend_env(frontend_dir, ws_port: int):
@@ -404,7 +480,6 @@ def start_servers(stop_event_ref):
         output_queue.put(("System", "Attempting to pre-clear known critical ports..."))
         ports_to_pre_clear = [
             tcp_port,
-            ota_port,
             ws_port,              # direct_bridge.py WS bridge
             FRONTEND_DEV_PORT     # Frontend server
         ]
@@ -416,7 +491,21 @@ def start_servers(stop_event_ref):
     # --- End of proactive port clearing ---
 
     output_queue.put(("System", "Starting backend server (direct_bridge.py) - RasPi gateway if configured..."))
-    backend_process = run_command_gui(f"{sys.executable} direct_bridge.py", cwd=backend_dir)
+    # Prepare environment exports inline for the child process
+    be_env = parsed_env
+    if sys.platform == "win32":
+        env_prefix = " && ".join([f"set {k}={be_env[k]}" for k in [
+            'WS_BRIDGE_PORT','TCP_PORT','RASPI_HOST','RASPI_PORT',
+            'DISABLE_FILE_LOG','BRIDGE_BROADCAST_MIN_INTERVAL','WS_PING_INTERVAL','WS_PING_TIMEOUT'
+        ] if k in be_env and be_env[k] != ""]) 
+        cmd = f"{env_prefix} && {sys.executable} direct_bridge.py" if env_prefix else f"{sys.executable} direct_bridge.py"
+    else:
+        env_assign = " ".join([f"{k}={be_env[k]}" for k in [
+            'WS_BRIDGE_PORT','TCP_PORT','RASPI_HOST','RASPI_PORT',
+            'DISABLE_FILE_LOG','BRIDGE_BROADCAST_MIN_INTERVAL','WS_PING_INTERVAL','WS_PING_TIMEOUT'
+        ] if k in be_env and be_env[k] != ""]) 
+        cmd = f"{env_assign} {sys.executable} direct_bridge.py".strip()
+    backend_process = run_command_gui(cmd, cwd=backend_dir)
     if backend_process.stdout is None or backend_process.stderr is None:
         output_queue.put(("System-ERR", "Failed to get stdout/stderr for backend process."))
         # Even if backend fails to start, proceed to attempt frontend start if desired,
@@ -438,7 +527,7 @@ def start_servers(stop_event_ref):
         if backend_process and backend_process.poll() is not None:
             output_queue.put(("System-ERR", "Backend exited during startup (possible port conflict). Attempting automatic port cleanup and one restart..."))
             # Attempt to free critical backend ports
-            for port_num in [tcp_port, ota_port, ws_port]:
+            for port_num in [tcp_port, ws_port]:
                 force_close_port(port_num, output_queue)
             # Restart backend once
             backend_process = run_command_gui(f"{sys.executable} direct_bridge.py", cwd=backend_dir)

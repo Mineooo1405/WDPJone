@@ -86,6 +86,21 @@ const PIDControlWidget: React.FC = () => {
         setIsSending(false); // Reset isSending cho cả trường hợp load
         setTimeout(() => setCommandStatus('idle'), 3000);
 
+      } else if (message.type === 'ack') {
+        // Backend trả về 'ack' cho set_pid
+        const cmd = message.command;
+        if (cmd === 'set_pid') {
+          setIsSending(false);
+          if (message.status === 'success') {
+            setStatusMessage('Đã gửi PID tới robot.');
+            setCommandStatus('success');
+          } else {
+            setStatusMessage(message.message || 'Lỗi gửi PID tới robot.');
+            setCommandStatus('error');
+          }
+          setTimeout(() => setCommandStatus('idle'), 2500);
+        }
+
       } else if (message.type === 'command_response') {
         // Kiểm tra xem phản hồi này có liên quan đến lệnh PID đã gửi không
         // Backend nên gửi lại thông tin về lệnh gốc hoặc payload type
@@ -148,12 +163,14 @@ const PIDControlWidget: React.FC = () => {
       return;
     }
     
+    setIsSending(true);
     setStatusMessage("Đang yêu cầu tải PID từ server...");
     setCommandStatus('idle');
     sendJsonMessage({
       command: "load_pid_config",
   robot_alias: selectedRobotId
     });
+    // isSending sẽ được reset khi nhận phản hồi pid_config_response
   };
 
   // Handle input changes

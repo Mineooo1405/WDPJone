@@ -645,24 +645,8 @@ const IMUWidget: React.FC = () => {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-        <div className="bg-gray-700 p-3 rounded-lg shadow-md">
-          <h3 className="font-semibold text-gray-100 mb-2 text-center">3D Orientation</h3>
-          <div className="aspect-square w-full max-w-xs mx-auto bg-gray-100 rounded">
-            <SimpleYPRVisualizer 
-              roll={currentImuData?.roll || 0}
-              pitch={currentImuData?.pitch || 0}
-              yaw={currentImuData?.yaw || 0}
-            />
-          </div>
-          <div className="grid grid-cols-3 gap-2 text-center mt-2 text-xs">
-            <div className="p-1.5 bg-gray-600 rounded"><div className="opacity-70">Roll</div><div className="font-semibold">{formatAngleDeg(currentImuData?.roll)}</div></div>
-            <div className="p-1.5 bg-gray-600 rounded"><div className="opacity-70">Pitch</div><div className="font-semibold">{formatAngleDeg(currentImuData?.pitch)}</div></div>
-            <div className="p-1.5 bg-gray-600 rounded"><div className="opacity-70">Yaw</div><div className="font-semibold">{formatAngleDeg(currentImuData?.yaw)}</div></div>
-          </div>
-        </div>
-
-        <div className="bg-gray-700 p-3 rounded-lg shadow-md">
-          <h3 className="font-semibold text-gray-100 mb-2 text-center">Current Values</h3>
+        <div className="bg-gray-700 p-3 rounded-lg shadow-md md:col-span-2">
+          <h3 className="font-semibold text-gray-100 mb-2 text-center">IMU (Euler & Quaternion)</h3>
            <div className="space-y-2 text-sm">
             <div>
               <h4 className="font-medium text-gray-300 mb-1">Orientation (Euler)</h4>

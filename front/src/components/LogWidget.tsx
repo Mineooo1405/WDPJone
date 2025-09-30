@@ -60,7 +60,8 @@ const LogWidget: React.FC = () => {
           robotAlias: message.robot_alias,
           component: message.component || parseComponentFromMessage(message.message || '')
         };
-        setLogs(prev => [...prev, newLogEntry].slice(-1000));
+        // Giới hạn tối đa 200 dòng để widget không bị kéo dài
+        setLogs(prev => [...prev, newLogEntry].slice(-200));
         setWidgetError(null);
       }
     }
@@ -192,8 +193,8 @@ const LogWidget: React.FC = () => {
       
       <div 
         ref={scrollContainerRef}
-        className="flex-grow overflow-y-auto font-mono text-xs bg-gray-900 rounded-md p-2 border border-gray-700"
-        style={{ minHeight: '200px'}}
+        className="overflow-y-auto font-mono text-xs bg-gray-900 rounded-md p-2 border border-gray-700"
+        style={{ height: '320px' }}
         onScroll={(e) => {
           const element = e.currentTarget;
           const isAtBottom = element.scrollHeight - element.scrollTop <= element.clientHeight + 20; 

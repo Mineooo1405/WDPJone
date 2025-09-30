@@ -50,6 +50,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
   // Map and navigation state
   const [mapImageUrl, setMapImageUrl] = useState<string | null>(null);
   const [mapMeta, setMapMeta] = useState<{ width: number; height: number; resolution: number; origin_x: number; origin_y: number } | null>(null);
+  // Removed path planning/navigation state per request (position-only rendering)
   const [plannedPaths, setPlannedPaths] = useState<Record<string, { x: number; y: number }[]>>({});
   const [navStatus, setNavStatus] = useState<Record<string, string>>({});
 
@@ -152,13 +153,8 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
             robotTypesRef.current[alias] = 'mecanum';
             chartRef.current?.update('none');
           }
-        } else if (message.type === 'planned_path' && message.robot_alias) {
-          const alias = message.robot_alias as string;
-          const points = Array.isArray(message.points) ? message.points.filter((p: any) => typeof p.x === 'number' && typeof p.y === 'number') : [];
-          setPlannedPaths(prev => ({ ...prev, [alias]: points }));
-        } else if (message.type === 'navigation_status' && message.robot_alias) {
-          const alias = message.robot_alias as string;
-          if (typeof message.status === 'string') setNavStatus(prev => ({ ...prev, [alias]: message.status }));
+        } else if (message.type === 'planned_path' || message.type === 'navigation_status') {
+          // Ignore all path planning/navigation messages (position-only mode)
         } else if (message.type === 'map_loaded') {
           const { width, height, resolution, origin_x, origin_y } = message;
           if (typeof width === 'number' && typeof height === 'number' && typeof resolution === 'number') {
@@ -173,7 +169,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     }
   }, [lastJsonMessage, widgetError]);
 
-  // Effect for subscribing to all connected robots (position_update for drawing, encoder_data for type detection, navigation topics)
+  // Effect for subscribing to all connected robots (position_update for drawing, encoder_data for type detection)
   useEffect(() => {
     if (readyState !== ReadyState.OPEN) return;
     const currentSubs = subscribedAliasesRef.current;
@@ -183,8 +179,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     currentSubs.forEach(alias => {
       if (!targetAliases.has(alias)) {
         sendJsonMessage({ command: 'unsubscribe', type: 'position_update', robot_alias: alias });
-        sendJsonMessage({ command: 'unsubscribe', type: 'planned_path', robot_alias: alias });
-        sendJsonMessage({ command: 'unsubscribe', type: 'navigation_status', robot_alias: alias });
+        // No longer subscribe to planned_path or navigation_status
         if (appConfig.features.encoderTypeDetection) {
           sendJsonMessage({ command: 'unsubscribe', type: 'encoder_data', robot_alias: alias });
         }
@@ -198,8 +193,6 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     targetAliases.forEach(alias => {
       if (!currentSubs.has(alias)) {
         sendJsonMessage({ command: 'subscribe', type: 'position_update', robot_alias: alias });
-        sendJsonMessage({ command: 'subscribe', type: 'planned_path', robot_alias: alias });
-        sendJsonMessage({ command: 'subscribe', type: 'navigation_status', robot_alias: alias });
         // Subscribe to encoder_data solely for mecanum detection (4 channels)
         if (appConfig.features.encoderTypeDetection) {
           sendJsonMessage({ command: 'subscribe', type: 'encoder_data', robot_alias: alias });
@@ -212,8 +205,6 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     return () => {
       currentSubs.forEach(alias => {
         sendJsonMessage({ command: 'unsubscribe', type: 'position_update', robot_alias: alias });
-        sendJsonMessage({ command: 'unsubscribe', type: 'planned_path', robot_alias: alias });
-        sendJsonMessage({ command: 'unsubscribe', type: 'navigation_status', robot_alias: alias });
         if (appConfig.features.encoderTypeDetection) {
           sendJsonMessage({ command: 'unsubscribe', type: 'encoder_data', robot_alias: alias });
         }
@@ -469,23 +460,7 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     if (!chart) return;
     const aliases = Object.keys(robotPaths);
     const datasets: any[] = [];
-    // Planned paths first (thin, dashed)
-    Object.keys(plannedPaths).forEach(alias => {
-      const pathPts = plannedPaths[alias] || [];
-      if (pathPts.length === 0) return;
-      const color = getColorForAlias(alias);
-      datasets.push({
-        label: `${alias} planned`,
-        data: pathPts as any,
-        borderColor: color,
-        pointBackgroundColor: color,
-        borderDash: [6, 4],
-        borderWidth: 2,
-        pointRadius: 0,
-        fill: false,
-        tension: 0,
-      });
-    });
+        // Planned paths removed in position-only mode
     // Actual paths
     aliases.forEach((alias) => {
       const color = getColorForAlias(alias);
@@ -628,14 +603,14 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
         <div className="flex items-center gap-2 ml-auto">
           {/* Map controls */}
           <div className="flex items-center gap-2">
-            <button
-              onClick={onUploadMapClick}
-              className="px-3 py-1.5 bg-emerald-600 text-white rounded-md flex items-center gap-1 hover:bg-emerald-700 disabled:opacity-50 text-xs"
-              disabled={firmwareUpdateMode}
-              title="Upload occupancy map image"
-            >
-              Upload Map
-            </button>
+          <button
+            onClick={onUploadMapClick}
+            className="px-3 py-1.5 bg-emerald-600 text-white rounded-md flex items-center gap-1 hover:bg-emerald-700 disabled:opacity-50 text-xs"
+            disabled={firmwareUpdateMode}
+            title="Upload occupancy map image"
+          >
+            Upload Map
+          </button>
             <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={onMapFileSelected} />
             <div className="flex items-center gap-1 text-xs text-gray-600 dark:text-gray-300">
               <label>res:</label>
@@ -665,12 +640,6 @@ const TrajectoryWidget: React.FC<{ compact?: boolean }> = ({ compact = false }) 
           </button>
           <button
             onClick={() => {
-              // Clear all
-              Object.keys(robotPaths).forEach(alias => {
-                if (readyState === WebSocket.OPEN) {
-                  sendJsonMessage({ command: 'clear_trajectory', robot_alias: alias });
-                }
-              });
               setRobotPaths({}); setRobotPoses({}); robotPosesRef.current = {};
               chartRef.current?.update('none');
             }}

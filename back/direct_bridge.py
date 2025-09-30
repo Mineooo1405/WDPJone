@@ -58,7 +58,7 @@ except Exception:
 # --- Configuration from Environment Variables with Fallbacks ---
 TCP_PORT_DEFAULT = 12346
 WS_PORT_DEFAULT = 9003
-OTA_PORT_DEFAULT = 12345
+OTA_PORT_DEFAULT = 12345  # Deprecated in RasPi-only mode
 LOG_LEVEL_DEFAULT = "INFO"
 LOG_DIRECTORY_DEFAULT = "logs/bridge_logs"
 MAX_TRAJECTORY_POINTS_DEFAULT = 1000
@@ -201,7 +201,8 @@ class TrajectoryCalculator:
         imu_data = robot_state["latest_imu_data"]
         # If IMU is missing, proceed using current theta but warn only once
         if not imu_data and not robot_state["imu_missing_warned"]:
-            logger.warning(f"IMU data not available for {unique_robot_key}. Falling back to odometry-only heading.")
+            # Reduced noise: do not warn repeatedly when IMU absent
+            # logger.warning(f"IMU data not available for {unique_robot_key}. Falling back to odometry-only heading.")
             robot_state["imu_missing_warned"] = True
 
         timestamp_encoder = encoder_data.get("timestamp", time.time())
@@ -396,7 +397,7 @@ class DataLogger:
         self.log_directory = log_directory or os.environ.get("LOG_DIRECTORY", LOG_DIRECTORY_DEFAULT)
         if not self.disabled:
             os.makedirs(self.log_directory, exist_ok=True)
-        self.log_files = {}
+        self.log_files = {} 
         self.session_start_time = time.strftime('%Y%m%d_%H%M%S')
 
     def get_log_file(self, unique_robot_key, data_type):
@@ -405,26 +406,26 @@ class DataLogger:
         if unique_robot_key not in self.log_files:
             self.log_files[unique_robot_key] = {}
 
-        safe_robot_key = unique_robot_key.replace(":", "_").replace(".","_") # Make it more filename friendly
-        log_filename = os.path.join(self.log_directory, f"{data_type}_{safe_robot_key}_{self.session_start_time}.txt")
-        
-        try:
-            file_handle = open(log_filename, "a") 
-            self.log_files[unique_robot_key][data_type] = file_handle
-            logger.info(f"Logging {data_type} for {unique_robot_key} to {log_filename}")
-            if os.path.getsize(log_filename) == 0:
-                if data_type == "encoder":
-                    file_handle.write("Time RPM1 RPM2 RPM3\n")
-                elif data_type == "bno055" or data_type == "imu":
-                    file_handle.write("Time Heading Pitch Roll W X Y Z AccelX AccelY AccelZ GravityX GravityY GravityZ\n") 
-                elif data_type == "log" or data_type == "log_data":
-                    file_handle.write("Time Message\n")
-                elif data_type == "position_update":
-                    file_handle.write("Time X Y Theta\n")
-                file_handle.flush()
-        except Exception as e:
-            logger.error(f"Failed to open log file for {unique_robot_key} {data_type}: {e}")
-            return None
+            safe_robot_key = unique_robot_key.replace(":", "_").replace(".","_") # Make it more filename friendly
+            log_filename = os.path.join(self.log_directory, f"{data_type}_{safe_robot_key}_{self.session_start_time}.txt")
+            
+            try:
+                file_handle = open(log_filename, "a") 
+                self.log_files[unique_robot_key][data_type] = file_handle
+                logger.info(f"Logging {data_type} for {unique_robot_key} to {log_filename}")
+                if os.path.getsize(log_filename) == 0:
+                    if data_type == "encoder":
+                        file_handle.write("Time RPM1 RPM2 RPM3\n")
+                    elif data_type == "bno055" or data_type == "imu":
+                        file_handle.write("Time Heading Pitch Roll W X Y Z AccelX AccelY AccelZ GravityX GravityY GravityZ\n") 
+                    elif data_type == "log" or data_type == "log_data":
+                        file_handle.write("Time Message\n")
+                    elif data_type == "position_update":
+                        file_handle.write("Time X Y Theta\n")
+                    file_handle.flush()
+            except Exception as e:
+                logger.error(f"Failed to open log file for {unique_robot_key} {data_type}: {e}")
+                return None
         return self.log_files[unique_robot_key].get(data_type)
 
     def log_data(self, unique_robot_key, data_type, message_dict):
@@ -519,6 +520,12 @@ logger = logging.getLogger("DirectBridge")
 log_tcp = logger.getChild("TCP")
 log_ws = logger.getChild("WS")
 log_ota = logger.getChild("OTA")
+
+# --- Reduce noise: only keep connection events and BE<->Robot payload directions ---
+for lg in (logger, log_tcp, log_ws, log_ota):
+    lg.handlers = []  # let root/basicConfig handle
+    lg.propagate = True
+    lg.setLevel(logging.INFO)
 log_fw = logger.getChild("FWUP")
 log_traj = logger.getChild("TRAJ")
 # Initialize DataLogger (can be disabled by DISABLE_FILE_LOG=1)
@@ -537,7 +544,7 @@ class OTAConnection:
     def __init__(self):
         # For OTA Server functionality
         # Support multiple robots: map robot_ip -> prepared firmware path
-        self._firmware_map = {}  # { robot_ip: firmware_path }
+        self._firmware_map = {}  # { robot_ip: firmware_path }  # Deprecated
         self.ota_server_instance = None # To hold the asyncio.Server object
         self._ws_broadcast = broadcast_to_all_ui
 
@@ -703,9 +710,8 @@ class OTAConnection:
         try:
             # This server instance would be temporary if using "start_once" logic.
             # For always-on, the server instance is managed differently.
-            temp_server = await asyncio.start_server(
-                self.handle_ota_robot_connection, '0.0.0.0', ota_port
-            )
+            # OTA server disabled in RasPi-only mode
+            return False
             logger.info(f"Temporary OTA Server started on 0.0.0.0:{ota_port}. It will close after one connection.")
             # Note: temp_server is not stored; this method is legacy and generally unused.
             return True
@@ -714,27 +720,12 @@ class OTAConnection:
             return False
 
     async def start_persistent_ota_server(self, ota_port):
-        if self.ota_server_instance and self.ota_server_instance.is_serving():
-            logger.info(f"Persistent OTA server is already running on port {ota_port}.")
-            return True
-        try:
-            self.ota_server_instance = await asyncio.start_server(
-                self.handle_ota_robot_connection, '0.0.0.0', ota_port
-            )
-            self.ota_port_arg_val = ota_port # Store for reference, though port is fixed once started
-            logger.info(f"Persistent OTA Server started successfully on 0.0.0.0:{ota_port}.")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start persistent OTA server on port {ota_port}: {e}")
-            self.ota_server_instance = None
-            return False
+        # Disabled in RasPi-only mode
+        logger.info("OTA server disabled (RasPi-only mode)")
+        return False
 
     async def stop_ota_server(self):
-        if self.ota_server_instance:
-            self.ota_server_instance.close()
-            await self.ota_server_instance.wait_closed()
-            self.ota_server_instance = None
-            logger.info("OTA Server stopped by request.")
+        # No-op in RasPi-only mode
         self._firmware_map.clear()
 
 class FirmwareUploadManager:
@@ -795,7 +786,8 @@ class DirectBridge:
         self.manager = ConnectionManager()  # Removed robot_alias_manager argument
         self.tcp_port = tcp_port
         self.ws_port = ws_port
-        self.ota_connection = OTAConnection()
+        # OTA removed for RasPi-only mode
+        self.ota_connection = None
         self.trajectory_calculator = TrajectoryCalculator()
         self.pid_config_file = pid_config_file_path if pid_config_file_path else os.environ.get("PID_CONFIG_FILE", PID_CONFIG_FILE_DEFAULT)
         self.pid_config_cache = {}  # Initialize PID config cache
@@ -813,6 +805,7 @@ class DirectBridge:
         self.robot_type_by_key = {}
         # Database disabled per request
         self.db = None
+        # RasPi-only firmware upload manager
         self.fw_upload_mgr = FirmwareUploadManager(self.temp_firmware_dir)
         # Map and navigation
         self.grid_map = None  # {"occ": np.ndarray(bool), "resolution": float, "origin": (ox, oy), "size": (w,h)}
@@ -837,6 +830,10 @@ class DirectBridge:
         self._raspi_seen_robot_ids = set()
         self._raspi_ready_event = asyncio.Event()
         self._raspi_last_firmware_path = None
+        # Last-seen timestamps per data type to throttle logs and health-check
+        self._last_seen_by_type = {}
+        # Start background watchdog to warn if no encoder/imu for 5s per robot
+        self._watchdog_task = asyncio.create_task(self._rx_watchdog())
 
     async def _handle_raspi_line(self, raw_line: str):
         """Process one newline-delimited JSON coming from RasPi laptop port.
@@ -860,9 +857,16 @@ class DirectBridge:
         unique_robot_key = current_alias  # Use id as unique key in RasPi mode
         robot_ip_address = "raspi"
 
-        # First sight of this robot id → announce to UI/DB
+        # First sight of this robot id → register alias mapping and announce to UI
         if current_alias and current_alias not in self._raspi_seen_robot_ids:
             self._raspi_seen_robot_ids.add(current_alias)
+            try:
+                async with robot_alias_manager["lock"]:
+                    robot_alias_manager["alias_to_ip_port"][current_alias] = unique_robot_key
+                    robot_alias_manager["ip_to_alias"][current_alias] = current_alias
+                    robot_alias_manager["ip_port_to_alias"][unique_robot_key] = current_alias
+            except Exception:
+                pass
             try:
                 await broadcast_to_all_ui({
                     "type": "available_robot_update",
@@ -876,6 +880,7 @@ class DirectBridge:
                     },
                     "timestamp": time.time()
                 })
+                log_tcp.info(f"RasPi robot announced to UI: {current_alias}")
             except Exception:
                 pass
             # DB disabled
@@ -890,6 +895,16 @@ class DirectBridge:
             msg_type = transformed_message.get("type")
             self.data_logger.log_data(unique_robot_key, msg_type or "unknown_data", transformed_message)
             await self.broadcast_to_subscribers(current_alias, transformed_message)
+
+            # Health/logging: record last-seen time for encoder/imu and emit concise logs
+            now_t = time.time()
+            if msg_type in ("encoder_data", "imu_data"):
+                key = (current_alias, msg_type)
+                last = self._last_seen_by_type.get(key)
+                # Log only once per 5s at most for "received" message
+                if not last or (now_t - last) >= 5.0:
+                    log_tcp.info(f"RasPi RX ok: {msg_type} from {current_alias}")
+                self._last_seen_by_type[key] = now_t
 
             if msg_type == "encoder_data":
                 encoder_rpms_list = transformed_message.get("data")
@@ -1253,6 +1268,23 @@ class DirectBridge:
                     "status": "connected",
                     "robot_type": getattr(self, 'robot_type_by_key', {}).get(ukey, "omni")
                 })
+
+        # Include robots seen via RasPi gateway (no direct TCP client to backend)
+        try:
+            seen = getattr(self, '_raspi_seen_robot_ids', set()) or set()
+            existing_aliases = {r.get('alias') for r in robots_list}
+            for alias in seen:
+                if alias not in existing_aliases:
+                    robots_list.append({
+                        "alias": alias,
+                        "ip": alias,
+                        "unique_key": alias,
+                        "status": "connected",
+                        "robot_type": getattr(self, 'robot_type_by_key', {}).get(alias, "omni")
+                    })
+        except Exception:
+            pass
+
         return robots_list
 
     async def send_connected_robots_list_to_client(self, websocket):
@@ -1261,13 +1293,28 @@ class DirectBridge:
         """
         try:
             robots = await self.get_connected_robots_list()
+            # Bổ sung các robot đã thấy qua RasPi gateway (nếu có) để client mới nhìn thấy ngay
+            try:
+                seen = getattr(self, '_raspi_seen_robot_ids', set()) or set()
+                existing_aliases = {r.get('alias') for r in robots}
+                for alias in seen:
+                    if alias not in existing_aliases:
+                        robots.append({
+                            "alias": alias,
+                            "ip": alias,  # sử dụng alias như ip hiển thị
+                            "unique_key": alias,
+                            "status": "connected",
+                            "robot_type": getattr(self, 'robot_type_by_key', {}).get(alias, "omni")
+                        })
+            except Exception:
+                pass
             payload = {
                 "type": "available_robots_initial_list",
                 "robots": robots,
                 "timestamp": time.time()
             }
             await websocket.send(json.dumps(payload))
-            logger.info(f"Sent initial connected robots list to WS client {getattr(websocket, 'remote_address', None)}")
+            log_ws.info(f"WS init list -> {getattr(websocket, 'remote_address', None)}: {len(robots)} robot(s)")
         except Exception as e:
             logger.error(f"Failed to send connected robots list to WS client {getattr(websocket, 'remote_address', None)}: {e}")
     def get_websocket_cors_headers(self, path: str, request_headers):
@@ -1275,24 +1322,30 @@ class DirectBridge:
         # Default frontend origin for Vite dev environment
         frontend_origin = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173") 
         
-        cors_headers_list = [
-            ('Access-Control-Allow-Origin', frontend_origin)
-        ]
-        
-        # If not allowing all origins, and a specific origin is set, 
-        # we can also allow credentials.
-        if frontend_origin != "*":
-            cors_headers_list.append(('Access-Control-Allow-Credentials', 'true'))
-            # You might also want to specify allowed methods and headers if your JS client sends them
-            # during the upgrade request, though often not strictly needed for WS itself.
-            cors_headers_list.append(('Access-Control-Allow-Methods', 'GET, OPTIONS'))
-            cors_headers_list.append(('Access-Control-Allow-Headers', 'Content-Type, Authorization'))
-
-        # Log the origin from the request headers for debugging purposes
-        # origin_from_request = request_headers.get("Origin")
-        # logger.debug(f"WebSocket handshake request from origin: {origin_from_request}. Allowed origin: {frontend_origin}. Path: {path}")
-        logger.debug(f"Adding CORS headers for WebSocket handshake to {frontend_origin}: {cors_headers_list}")
-        return cors_headers_list
+    async def _rx_watchdog(self):
+        """Periodically check if encoder/imu have stopped for any robot (>=5s)."""
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                now_t = time.time()
+                # Build set of robots seen via raspi
+                try:
+                    seen_aliases = list(self._raspi_seen_robot_ids)
+                except Exception:
+                    seen_aliases = []
+                for alias in seen_aliases:
+                    for typ in ("encoder_data", "imu_data"):
+                        last = self._last_seen_by_type.get((alias, typ))
+                        if last and (now_t - last) > 5.0:
+                            log_tcp.warning(f"No {typ} from {alias} for >5s")
+                            # avoid spamming every second
+                            self._last_seen_by_type[(alias, typ)] = now_t  # reset so next warn comes after 5s again
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            # watchdog must not crash the bridge
+            pass
+        # Removed stray CORS helper block (not used). If needed, re-enable get_websocket_cors_headers.
 
     async def load_pid_config_from_file(self, target_robot_ip=None):
         pid_data_per_motor = {}
@@ -1377,10 +1430,7 @@ class DirectBridge:
     
     async def start(self):
         # Start the persistent OTA server
-        if self.ota_port_arg is not None:
-            asyncio.create_task(self.ota_connection.start_persistent_ota_server(self.ota_port_arg))
-        else:
-            logger.warning("OTA port not specified, OTA server will not start.")
+        # OTA server disabled
 
         # Load PID configurations from file and cache them
         loaded_pids = await self.load_pid_config_from_file() # target_robot_ip is None, loads for caching
@@ -1395,7 +1445,7 @@ class DirectBridge:
         # Remove direct ESP server: operate only via RasPi gateway
         if getattr(self, 'raspi_host', None):
             asyncio.create_task(self._raspi_client_loop())
-            log_tcp.info("Direct ESP TCP server disabled. Using RasPi gateway only.")
+            log_tcp.info("Direct TCP server disabled. Using RasPi gateway only.")
         else:
             log_tcp.warning("RASPI_HOST is not configured. No robot data source is active.")
         
@@ -1554,8 +1604,7 @@ class DirectBridge:
                 try:
                     message_from_robot = json.loads(raw_data_str)
                     
-                    # DEBUG LOGGING to see the raw parsed message before transformation
-                    #logger.info(f"[PRE-TRANSFORM] Robot: {current_alias}, Type: '{message_from_robot.get('type')}', Keys: '{list(message_from_robot.keys())}', DataPreview: {str(message_from_robot.get('data'))[:100] if message_from_robot.get('data') else 'N/A'}")
+                    # Minimal logging only when needed elsewhere
 
                     transformed_message = transform_robot_message(message_from_robot)
                     
@@ -1936,7 +1985,7 @@ class DirectBridge:
 
         client_addr = websocket.remote_address
         ws_identifier = f"{client_addr[0]}:{client_addr[1]}" if client_addr else "UnknownWSClient"
-        logger.info(f"WebSocket client connected: {ws_identifier} on path: {path}")
+        log_ws.info(f"WS connected: {ws_identifier} path={path}")
         
         ui_websockets.add(websocket)
         await self.send_connected_robots_list_to_client(websocket) # This line will now work
@@ -1991,7 +2040,7 @@ class DirectBridge:
                                 self.websocket_subscriptions[client_addr][actual_subscription_entity_key] = set()
                             self.websocket_subscriptions[client_addr][actual_subscription_entity_key].add(data_type_to_sub)
                         
-                        logger.info(f"{ws_identifier} subscribed to '{data_type_to_sub}' for '{display_target}' (Key: {actual_subscription_entity_key}) using 'subscribe' command.")
+                        # Reduce subscription chatter
                         await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_sub, "subscribed_key": actual_subscription_entity_key, "robot_alias": target_alias}))
 
                         # Immediately send snapshot for realtime_trajectory or position_update if requested
@@ -2058,7 +2107,7 @@ class DirectBridge:
                                     del self.websocket_subscriptions[client_addr][unsubscription_entity_key]
                                 if not self.websocket_subscriptions[client_addr]: # If dict for client_addr is empty
                                     del self.websocket_subscriptions[client_addr]
-                                logger.info(f"{ws_identifier} unsubscribed from '{data_type_to_unsub}' for '{display_target}' (Key: {unsubscription_entity_key}) using 'unsubscribe' command.")
+                                # Reduce unsubscription chatter
                                 await websocket.send(json.dumps({"type": "ack", "command": command, "status": "success", "data_type": data_type_to_unsub, "unsubscribed_key": unsubscription_entity_key, "robot_alias": target_alias}))
                             else:
                                 logger.info(f"{ws_identifier} attempted to unsubscribe from '{data_type_to_unsub}' for '{display_target}' but no active subscription found.")
@@ -2112,6 +2161,8 @@ class DirectBridge:
                         if robot_alias:
                             ok = await self.send_text_command_by_alias(robot_alias, "EMERGENCY_STOP")
                             await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                            if ok:
+                                log_tcp.info(f"BE->Robot ({robot_alias}): EMERGENCY_STOP")
                         else:
                             await websocket.send(json.dumps({"type":"error","command":command,"message":"Missing robot_alias"}))
                     elif command == "vector_control":
@@ -2164,6 +2215,8 @@ class DirectBridge:
                                     robot_status_payload = self.build_robot_status_snapshot(unique_key_for_ctrl, robot_alias, robot_alias)
                                     await self.broadcast_to_subscribers(robot_alias, robot_status_payload)
                             await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
+                            if ok:
+                                log_tcp.info(f"BE->Robot ({robot_alias}): vector_control dot_x:{dot_x} dot_y:{dot_y} dot_theta:{dot_theta} stop_time:{stop_time}")
                         except Exception as e:
                             await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
                     elif command == "position_control":
@@ -2205,71 +2258,7 @@ class DirectBridge:
                             await websocket.send(json.dumps({"type":"ack","command":command,"status":"success" if ok else "failed","robot_alias": robot_alias}))
                         except Exception as e:
                             await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
-                    elif command == "upload_firmware_start":
-                        try:
-                            target_ip = data.get("robot_ip")
-                            filename = data.get("filename")
-                            filesize = int(data.get("filesize", 0))
-                            if not target_ip or not filename or filesize <= 0:
-                                raise ValueError("Missing robot_ip, filename or invalid filesize")
-                            self.fw_upload_mgr.start(target_ip, filename, filesize)
-                            await websocket.send(json.dumps({
-                                "type": "firmware_status",
-                                "status": "ok",
-                                "robot_ip": target_ip,
-                                "message": "Upload initialized"
-                            }))
-                        except Exception as e:
-                            await websocket.send(json.dumps({
-                                "type": "firmware_status",
-                                "status": "error",
-                                "message": str(e)
-                            }))
-                    elif command == "firmware_data_chunk":
-                        try:
-                            target_ip = data.get("robot_ip")
-                            b64_chunk = data.get("data")
-                            chunk_index = int(data.get("chunk_index", 0))
-                            total_chunks = int(data.get("total_chunks", 0))
-                            if not target_ip or not b64_chunk:
-                                raise ValueError("Missing robot_ip or data chunk")
-                            received = self.fw_upload_mgr.add_chunk(target_ip, b64_chunk)
-                            await websocket.send(json.dumps({
-                                "type": "firmware_chunk_ack",
-                                "robot_ip": target_ip,
-                                "chunk_index": chunk_index,
-                                "total_chunks": total_chunks,
-                                "received": received
-                            }))
-                        except Exception as e:
-                            await websocket.send(json.dumps({
-                                "type": "firmware_status",
-                                "status": "error",
-                                "message": str(e)
-                            }))
-                    elif command == "upload_firmware_end":
-                        try:
-                            target_ip = data.get("robot_ip")
-                            if not target_ip:
-                                raise ValueError("Missing robot_ip")
-                            saved_path = self.fw_upload_mgr.finish(target_ip)
-                            if not saved_path:
-                                raise RuntimeError("Firmware aggregation failed or size mismatch")
-                            # Prepare OTA server to send to this IP on next OTA connection (multi-robot aware)
-                            self.ota_connection.set_prepared_firmware_for_robot(target_ip, saved_path)
-                            self._raspi_last_firmware_path = saved_path
-                            await websocket.send(json.dumps({
-                                "type": "firmware_prepared_for_ota",
-                                "robot_ip": target_ip,
-                                "ota_port": self.ota_port_arg,
-                                "firmware_size": os.path.getsize(saved_path)
-                            }))
-                        except Exception as e:
-                            await websocket.send(json.dumps({
-                                "type": "firmware_status",
-                                "status": "error",
-                                "message": str(e)
-                            }))
+                    # Firmware upload/OTA commands removed in RasPi-only mode
                     elif command == "upload_map":
                         try:
                             b64_data = data.get("data")
@@ -2392,8 +2381,43 @@ class DirectBridge:
                             })
                         except Exception as e:
                             await websocket.send(json.dumps({"type":"error","command":command,"message": str(e)}))
+                    elif command == "upload_firmware_start":
+                        # FE bắt đầu upload firmware (RasPi mode)
+                        try:
+                            robot_ip = data.get("robot_ip") or data.get("robot_alias")
+                            filename = data.get("filename","firmware.bin")
+                            filesize = int(data.get("filesize", 0))
+                            if not robot_ip or filesize <= 0:
+                                raise ValueError("Missing robot_ip or invalid filesize")
+                            self.fw_upload_mgr.start(robot_ip, filename, filesize)
+                            await websocket.send(json.dumps({"type":"firmware_upload_ack","status":"ready","robot_ip":robot_ip}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"firmware_upload_ack","status":"error","message":str(e)}))
+                    elif command == "firmware_data_chunk":
+                        try:
+                            robot_ip = data.get("robot_ip") or data.get("robot_alias")
+                            chunk_b64 = data.get("data")
+                            if not robot_ip or not chunk_b64:
+                                raise ValueError("Missing robot_ip or chunk data")
+                            received = self.fw_upload_mgr.add_chunk(robot_ip, chunk_b64)
+                            await websocket.send(json.dumps({"type":"firmware_progress","robot_ip":robot_ip,"received_bytes":received}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"firmware_upload_ack","status":"error","message":str(e)}))
+                    elif command == "upload_firmware_end":
+                        try:
+                            robot_ip = data.get("robot_ip") or data.get("robot_alias")
+                            if not robot_ip:
+                                raise ValueError("Missing robot_ip")
+                            fw_path = self.fw_upload_mgr.finish(robot_ip)
+                            if not fw_path:
+                                raise ValueError("Firmware upload incomplete or size mismatch")
+                            self._raspi_last_firmware_path = fw_path
+                            log_tcp.info(f"Firmware uploaded for {robot_ip}: {fw_path}")
+                            await websocket.send(json.dumps({"type":"firmware_upload_ack","status":"complete","robot_ip":robot_ip,"firmware_path":fw_path}))
+                        except Exception as e:
+                            await websocket.send(json.dumps({"type":"firmware_upload_ack","status":"error","message":str(e)}))
                     elif command in ("upgrade", "upgrade_signal"):
-                        # RasPi firmware flow if available; else fallback to direct
+                        # RasPi firmware flow: send Upgrade, wait ready, send okay+firmware+COMPLETED
                         if robot_alias:
                             mode_override = data.get("mode")
                             if getattr(self, '_raspi_writer', None) is not None:
@@ -2403,37 +2427,38 @@ class DirectBridge:
                                     self._raspi_ready_event.clear()
                                     self._raspi_writer.write(payload)
                                     await self._raspi_writer.drain()
-                                    # 2) Wait for 'ready'
+                                    log_tcp.info("Sent Upgrade to RasPi, waiting for 'ready'...")
+                                    # 2) Wait for 'ready' (with timeout)
                                     try:
-                                        await asyncio.wait_for(self._raspi_ready_event.wait(), timeout=5.0)
+                                        await asyncio.wait_for(self._raspi_ready_event.wait(), timeout=10.0)
                                     except asyncio.TimeoutError:
-                                        await websocket.send(json.dumps({"type":"ack","command":command,"status":"failed","robot_alias": robot_alias, "message": "Timeout waiting for 'ready' from RasPi"}))
-                                        continue
+                                        raise Exception("Timeout waiting for RasPi 'ready' signal")
+                                    log_tcp.info("RasPi ready. Sending 'okay' and firmware...")
                                     # 3) Send 'okay'
-                                    self._raspi_writer.write(b"okay")
+                                    self._raspi_writer.write(b"okay\n")
                                     await self._raspi_writer.drain()
-                                    # 4) Stream firmware if available
-                                    fw_path = self._raspi_last_firmware_path
-                                    if fw_path and os.path.exists(fw_path):
-                                        with open(fw_path, 'rb') as f:
-                                            while True:
-                                                chunk = f.read(1024)
-                                                if not chunk:
-                                                    break
-                                                self._raspi_writer.write(chunk)
-                                                await self._raspi_writer.drain()
-                                        self._raspi_writer.write(b"COMPLETED")
-                                        await self._raspi_writer.drain()
-                                        await websocket.send(json.dumps({"type":"ack","command":command,"status":"success","robot_alias": robot_alias}))
-                                        await broadcast_to_all_ui({
-                                            "type": "firmware_status",
-                                            "status": "sent",
-                                            "robot_ip": robot_alias,
-                                            "message": "Firmware streamed via RasPi"
-                                        })
-                                    else:
-                                        await websocket.send(json.dumps({"type":"ack","command":command,"status":"failed","robot_alias": robot_alias, "message": "No prepared firmware. Upload first."}))
+                                    # 4) Stream firmware
+                                    fw_path = getattr(self, '_raspi_last_firmware_path', None)
+                                    if not fw_path or not os.path.exists(fw_path):
+                                        raise Exception("No firmware uploaded or file missing")
+                                    total = os.path.getsize(fw_path)
+                                    sent = 0
+                                    with open(fw_path, 'rb') as f:
+                                        while True:
+                                            chunk = f.read(1024)
+                                            if not chunk:
+                                                break
+                                            self._raspi_writer.write(chunk)
+                                            await self._raspi_writer.drain()
+                                            sent += len(chunk)
+                                    log_tcp.info(f"Firmware streamed: {sent}/{total} bytes")
+                                    # 5) Send COMPLETED
+                                    self._raspi_writer.write(b"COMPLETED\n")
+                                    await self._raspi_writer.drain()
+                                    log_tcp.info("Firmware update sequence completed.")
+                                    await websocket.send(json.dumps({"type":"ack","command":command,"status":"success","robot_alias": robot_alias}))
                                 except Exception as e:
+                                    log_tcp.error(f"Upgrade flow error: {e}")
                                     await websocket.send(json.dumps({"type":"ack","command":command,"status":"failed","robot_alias": robot_alias, "message": str(e)}))
                             else:
                                 ok = await self.send_upgrade_command_by_alias(robot_alias, mode_override)
@@ -2443,12 +2468,6 @@ class DirectBridge:
                                     "status":"success" if ok else "failed",
                                     "robot_alias": robot_alias
                                 }))
-                                await broadcast_to_all_ui({
-                                    "type": "firmware_status",
-                                    "status": "sent" if ok else "failed",
-                                    "robot_ip": robot_alias,
-                                    "message": (f"Upgrade command sent (mode={(mode_override or os.environ.get('BRIDGE_UPGRADE_MODE', 'raw')).lower()})" if ok else "Upgrade command failed")
-                                })
                         else:
                             await websocket.send(json.dumps({"type":"error","command":command,"message":"Missing robot_alias"}))
                     elif command == "get_robot_status":
@@ -2481,7 +2500,7 @@ class DirectBridge:
                 except Exception as e:
                     logger.error(f"Error processing message from {ws_identifier} ('{message_str}'): {e}", exc_info=True)
         finally:
-            logger.info(f"Cleaning up WebSocket client: {ws_identifier}")
+            log_ws.info(f"WS disconnected: {ws_identifier}")
             ui_websockets.discard(websocket) # Remove from global set of active UI websockets
             
             # Clean up this client's subscriptions from self.websocket_subscriptions
@@ -2499,7 +2518,7 @@ class DirectBridge:
             #                     del subscribers[data_type][sub_key]
             #                 if not subscribers[data_type]: # If dict for data_type is empty
             #                     del subscribers[data_type]
-            logger.info(f"WebSocket client {ws_identifier} removed from all subscriptions in DirectBridge.")
+            # Keep logs minimal
 
 def transform_robot_message(message_dict: dict) -> dict:
     """
@@ -2704,7 +2723,7 @@ async def main_bridge_runner():
     bridge.ota_port_arg = args.ota_port
     
     await bridge.start()
-    logger.info(f"DirectBridge running. Control TCP on {args.tcp_port}, WebSocket on {args.ws_port}, OTA on {args.ota_port}.")
+    logger.info(f"DirectBridge running. Control TCP on {args.tcp_port}, WebSocket on {args.ws_port}.")
     try:
         while True:
             await asyncio.sleep(3600)
@@ -2712,8 +2731,7 @@ async def main_bridge_runner():
         logger.info("DirectBridge stopping...")
     finally:
         data_logger.close_logs()
-        if hasattr(bridge, 'ota_connection') and bridge.ota_connection.ota_server_instance: # Check attribute before calling
-            await bridge.ota_connection.stop_ota_server()
+        # OTA disabled in RasPi-only mode: no server to stop
         logger.info("DirectBridge stopped.")
 
 if __name__ == "__main__":
