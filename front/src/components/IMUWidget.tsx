@@ -16,6 +16,9 @@ import {
 } from 'chart.js';
 import zoomPlugin from 'chartjs-plugin-zoom';
 import { appConfig } from '../config/appConfig';
+// Optional rendering decimation plugin to reduce draw cost on large datasets
+// Available in Chart.js v3+
+import { Decimation } from 'chart.js';
 
 // Register Chart.js components
 ChartJS.register(
@@ -26,7 +29,8 @@ ChartJS.register(
   Title,
   Tooltip,
   Legend,
-  zoomPlugin
+  zoomPlugin,
+  Decimation
 );
 
 // Performance optimization constants
@@ -94,6 +98,19 @@ interface ImuData {
   calibrated: boolean;
 }
 
+// Lightweight history sample stored in buffer to minimize memory footprint
+// Only the fields required for charts are kept
+type ImuHist = {
+  t: number; // timestamp
+  r: number; // roll
+  p: number; // pitch
+  y: number; // yaw
+  w: number; // quat w
+  x: number; // quat x
+  yq: number; // quat y
+  z: number; // quat z
+};
+
 
 const IMUWidget: React.FC = () => {
   const { selectedRobotId, sendJsonMessage, lastJsonMessage, readyState, getIncomingForRobot } = useRobotContext() as any;
@@ -102,13 +119,15 @@ const IMUWidget: React.FC = () => {
   const [widgetError, setWidgetError] = useState<string | null>(null);
   const [activeChart, setActiveChart] = useState<'orientation' | 'quaternion'>('orientation');
   
-  const messageBuffer = useRef<ImuData[]>([]);
+  const messageBuffer = useRef<ImuHist[]>([]);
   const lastUIUpdateTime = useRef(0);
   const animationFrameId = useRef<number | null>(null);
   const adaptiveTimerRef = useRef<number | null>(null);
   const adaptiveIntervalRef = useRef(ADAPT.enabled ? ADAPT.minIntervalMs : UI_UPDATE_INTERVAL);
   const lastRateSampleTimeRef = useRef(Date.now());
   const receivedSinceSampleRef = useRef(0);
+  // Keep last full IMU record without causing re-render per packet
+  const lastFullImuRef = useRef<ImuData | null>(null);
   
   const [history, setHistory] = useState({
     timestamps: [] as string[],
@@ -134,21 +153,28 @@ const IMUWidget: React.FC = () => {
     if (messageBuffer.current.length === 0) return;
     let newMessages = messageBuffer.current;
     messageBuffer.current = [];
-    if (ADAPT.enabled && newMessages.length > ADAPT.decimationThreshold) {
-      const stride = Math.ceil(newMessages.length / ADAPT.decimationThreshold);
-      newMessages = newMessages.filter((_, i) => i % stride === 0);
+    if (ADAPT.enabled) {
+      // Decimate progressively based on backlog size
+      const over = newMessages.length / ADAPT.decimationThreshold;
+      if (over > 1) {
+        // stronger decimation when backlog is much bigger
+        const stride = Math.ceil(newMessages.length / Math.min(ADAPT.decimationThreshold, MAX_HISTORY_POINTS));
+        newMessages = newMessages.filter((_, i) => i % stride === 0);
+      }
     }
-    const latestMessage = newMessages[newMessages.length - 1];
-    setCurrentImuData(latestMessage);
+    // Update current card using last full record at UI cadence to avoid high-frequency re-renders
+    if (lastFullImuRef.current) {
+      setCurrentImuData(lastFullImuRef.current);
+    }
     setHistory(prev => {
-      const newTimestamps = newMessages.map(msg => formatTimestampForChart(msg.timestamp));
-      const newRolls = newMessages.map(msg => msg.roll);
-      const newPitches = newMessages.map(msg => msg.pitch);
-      const newYaws = newMessages.map(msg => msg.yaw);
-      const newQuatW = newMessages.map(msg => msg.quat_w);
-      const newQuatX = newMessages.map(msg => msg.quat_x);
-      const newQuatY = newMessages.map(msg => msg.quat_y);
-      const newQuatZ = newMessages.map(msg => msg.quat_z);
+      const newTimestamps = newMessages.map(msg => formatTimestampForChart(msg.t));
+      const newRolls = newMessages.map(msg => msg.r);
+      const newPitches = newMessages.map(msg => msg.p);
+      const newYaws = newMessages.map(msg => msg.y);
+      const newQuatW = newMessages.map(msg => msg.w);
+      const newQuatX = newMessages.map(msg => msg.x);
+      const newQuatY = newMessages.map(msg => msg.yq);
+      const newQuatZ = newMessages.map(msg => msg.z);
       return {
         timestamps: [...prev.timestamps, ...newTimestamps].slice(-MAX_HISTORY_POINTS),
         orientation: {
@@ -230,10 +256,10 @@ const IMUWidget: React.FC = () => {
         const gyro = sanitizeVec3(imuPayload.gyro_raw);
         const status: string | undefined = typeof imuPayload.status === 'string' && imuPayload.status.trim() !== '' ? imuPayload.status : undefined;
 
-        // Prefer [yaw, pitch, roll] ordering (sim + backend yaw index default), fallback gracefully
-        const yawVal = typeof rawEuler[0] === 'number' ? rawEuler[0] : (typeof rawEuler[2] === 'number' ? rawEuler[2] : 0);
-        const pitchVal = typeof rawEuler[1] === 'number' ? rawEuler[1] : 0;
-        const rollVal = typeof rawEuler[2] === 'number' ? rawEuler[2] : (typeof rawEuler[0] === 'number' ? rawEuler[0] : 0);
+        // Backend normalizes Euler order to [yaw, pitch, roll] (degrees). Use strictly in that order.
+        const yawVal = rawEuler[0];
+        const pitchVal = rawEuler[1];
+        const rollVal = rawEuler[2];
         const newImuEntry: ImuData = {
           roll: rollVal,
           pitch: pitchVal,
@@ -257,9 +283,22 @@ const IMUWidget: React.FC = () => {
     // Drop oldest half to avoid unbounded growth
     messageBuffer.current = messageBuffer.current.slice(-Math.floor(ADAPT.maxBuffer/2));
   }
-  messageBuffer.current.push(newImuEntry);
+  // Push compact history sample only (keep full record in currentImuData)
+  messageBuffer.current.push({
+    t: newImuEntry.timestamp,
+    r: newImuEntry.roll,
+    p: newImuEntry.pitch,
+    y: newImuEntry.yaw,
+    w: newImuEntry.quat_w,
+    x: newImuEntry.quat_x,
+    yq: newImuEntry.quat_y,
+    z: newImuEntry.quat_z,
+  });
   scheduleUIUpdate();
-        setCurrentImuData(newImuEntry);
+        // Store last full record; defer UI update to flush cadence to avoid re-render storms
+        lastFullImuRef.current = newImuEntry;
+    // Count received messages for adaptive rate calculation
+    receivedSinceSampleRef.current = (receivedSinceSampleRef.current || 0) + 1;
         setWidgetError(null); // Clear previous errors on new data
 
       } else if (message.type === 'bno_event' && message.robot_alias === selectedRobotId) {
@@ -290,13 +329,24 @@ const IMUWidget: React.FC = () => {
             const imuPayload = m.data || {};
             const rawEuler = sanitizeEuler(imuPayload.euler);
             const rawQuat = sanitizeQuat(imuPayload.quaternion);
-            const yawVal = typeof rawEuler[0] === 'number' ? rawEuler[0] : (typeof rawEuler[2] === 'number' ? rawEuler[2] : 0);
-            const pitchVal = typeof rawEuler[1] === 'number' ? rawEuler[1] : 0;
-            const rollVal = typeof rawEuler[2] === 'number' ? rawEuler[2] : (typeof rawEuler[0] === 'number' ? rawEuler[0] : 0);
+            const yawVal = rawEuler[0];
+            const pitchVal = rawEuler[1];
+            const rollVal = rawEuler[2];
             if (ADAPT.enabled && messageBuffer.current.length >= ADAPT.maxBuffer) {
               messageBuffer.current = messageBuffer.current.slice(-Math.floor(ADAPT.maxBuffer/2));
             }
             messageBuffer.current.push({
+              t: m.timestamp || Date.now() / 1000,
+              r: rollVal,
+              p: pitchVal,
+              y: yawVal,
+              w: rawQuat[0],
+              x: rawQuat[1],
+              yq: rawQuat[2],
+              z: rawQuat[3],
+            } as ImuHist);
+            // Initialize lastFullImuRef from prefill for immediate display until live data arrives
+            lastFullImuRef.current = {
               roll: rollVal,
               pitch: pitchVal,
               yaw: yawVal,
@@ -304,11 +354,15 @@ const IMUWidget: React.FC = () => {
               quat_x: rawQuat[1],
               quat_y: rawQuat[2],
               quat_z: rawQuat[3],
+              lin_accel: [0,0,0],
+              gravity: [0,0,0],
+              gyro_raw: [0,0,0],
+              status: undefined,
               timestamp: m.timestamp || Date.now() / 1000,
               robot_ip: m.robot_ip || selectedRobotId,
               robot_alias: selectedRobotId,
               calibrated: false,
-            } as ImuData);
+            } as ImuData;
           });
           scheduleUIUpdate();
         }
@@ -410,14 +464,14 @@ const IMUWidget: React.FC = () => {
   const chartDataConfig = {
     labels: history.timestamps,
     datasets: activeChart === 'orientation' ? [
-      { label: 'Roll (deg)', data: history.orientation.roll, borderColor: 'rgb(255, 99, 132)', backgroundColor: 'rgba(255, 99, 132, 0.5)', tension: 0.1, pointRadius: 1 },
-      { label: 'Pitch (deg)', data: history.orientation.pitch, borderColor: 'rgb(54, 162, 235)', backgroundColor: 'rgba(54, 162, 235, 0.5)', tension: 0.1, pointRadius: 1 },
-      { label: 'Yaw (deg)', data: history.orientation.yaw, borderColor: 'rgb(75, 192, 192)', backgroundColor: 'rgba(75, 192, 192, 0.5)', tension: 0.1, pointRadius: 1 }
+      { label: 'Roll (deg)', data: history.orientation.roll, borderColor: 'rgb(255, 99, 132)', backgroundColor: 'rgba(255, 99, 132, 0.3)', tension: 0, pointRadius: 0, borderWidth: 1 },
+      { label: 'Pitch (deg)', data: history.orientation.pitch, borderColor: 'rgb(54, 162, 235)', backgroundColor: 'rgba(54, 162, 235, 0.3)', tension: 0, pointRadius: 0, borderWidth: 1 },
+      { label: 'Yaw (deg)', data: history.orientation.yaw, borderColor: 'rgb(75, 192, 192)', backgroundColor: 'rgba(75, 192, 192, 0.3)', tension: 0, pointRadius: 0, borderWidth: 1 }
     ] : [
-      { label: 'Quat W', data: history.quaternion.w, borderColor: 'rgb(255, 99, 132)', backgroundColor: 'rgba(255, 99, 132, 0.5)', tension: 0.1, pointRadius: 1 },
-      { label: 'Quat X', data: history.quaternion.x, borderColor: 'rgb(54, 162, 235)', backgroundColor: 'rgba(54, 162, 235, 0.5)', tension: 0.1, pointRadius: 1 },
-      { label: 'Quat Y', data: history.quaternion.y, borderColor: 'rgb(75, 192, 192)', backgroundColor: 'rgba(75, 192, 192, 0.5)', tension: 0.1, pointRadius: 1 },
-      { label: 'Quat Z', data: history.quaternion.z, borderColor: 'rgb(153, 102, 255)', backgroundColor: 'rgba(153, 102, 255, 0.5)', tension: 0.1, pointRadius: 1 }
+      { label: 'Quat W', data: history.quaternion.w, borderColor: 'rgb(255, 99, 132)', backgroundColor: 'rgba(255, 99, 132, 0.3)', tension: 0, pointRadius: 0, borderWidth: 1 },
+      { label: 'Quat X', data: history.quaternion.x, borderColor: 'rgb(54, 162, 235)', backgroundColor: 'rgba(54, 162, 235, 0.3)', tension: 0, pointRadius: 0, borderWidth: 1 },
+      { label: 'Quat Y', data: history.quaternion.y, borderColor: 'rgb(75, 192, 192)', backgroundColor: 'rgba(75, 192, 192, 0.3)', tension: 0, pointRadius: 0, borderWidth: 1 },
+      { label: 'Quat Z', data: history.quaternion.z, borderColor: 'rgb(153, 102, 255)', backgroundColor: 'rgba(153, 102, 255, 0.3)', tension: 0, pointRadius: 0, borderWidth: 1 }
     ]
   };
 
@@ -425,18 +479,19 @@ const IMUWidget: React.FC = () => {
     responsive: true,
     maintainAspectRatio: false,
     animation: false as const,
+    elements: { point: { radius: 0 } },
     scales: { x: { ticks: { maxTicksLimit: 8, color: '#AAA'}, grid: {color: 'rgba(255,255,255,0.1)'} }, y: { beginAtZero: false, ticks:{color: '#AAA'}, grid: {color: 'rgba(255,255,255,0.1)'} } },
     plugins: {
       legend: { position: 'top' as const, labels:{color: '#CCC'} },
       title: { display: false },
+      decimation: { enabled: true, algorithm: 'min-max', samples: MAX_HISTORY_POINTS },
       zoom: { pan: { enabled: true, mode: 'x' as const }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' as const } }
     },
   };
 
-  // Input values are already degrees; normalize to [-180, 180] and format
+  // Input values are already degrees; display as-is (no normalization) for fidelity
   const formatAngleDeg = (degIn: number = 0) => {
-    let deg = degIn;
-    deg = ((deg + 180) % 360 + 360) % 360 - 180;
+    const deg = Number.isFinite(degIn) ? degIn : 0;
     return `${deg.toFixed(1)}°`;
   };
 

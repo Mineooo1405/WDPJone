@@ -101,17 +101,18 @@ class AppGUI:
 
     def _init_tags(self, text_widget: scrolledtext.ScrolledText) -> None:
         try:
-            # Severity
-            text_widget.tag_config('log_error', foreground='#ff4d4d')
-            text_widget.tag_config('log_warn', foreground='#ffd24d')
-            # Channels
-            text_widget.tag_config('log_encoder', foreground='#00cc66')
-            text_widget.tag_config('log_imu', foreground='#00bfff')
-            text_widget.tag_config('log_fw', foreground='#ff9900')
-            text_widget.tag_config('log_tcp', foreground='#40c4ff')
-            text_widget.tag_config('log_ws', foreground='#b388ff')
-            text_widget.tag_config('log_ota', foreground='#ffb74d')
-            text_widget.tag_config('log_system', foreground='#cfcfcf')
+            # Improved, high-contrast color palette (optimized for light backgrounds)
+            # Severity (bold for emphasis)
+            text_widget.tag_config('log_error', foreground='#D32F2F', font=('Consolas', 9, 'bold'))  # dark red
+            text_widget.tag_config('log_warn', foreground='#F57C00', font=('Consolas', 9, 'bold'))   # dark orange
+            # Channels (darker tones for contrast)
+            text_widget.tag_config('log_encoder', foreground='#2E7D32')  # dark green
+            text_widget.tag_config('log_imu', foreground='#00796B')      # dark teal
+            text_widget.tag_config('log_fw', foreground='#8E24AA')       # purple
+            text_widget.tag_config('log_tcp', foreground='#0D47A1')      # navy blue
+            text_widget.tag_config('log_ws', foreground='#6A1B9A')       # deep purple
+            text_widget.tag_config('log_ota', foreground='#5D4037')      # brown
+            text_widget.tag_config('log_system', foreground='#424242')   # dark grey
         except Exception:
             pass
 

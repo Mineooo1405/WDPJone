@@ -103,6 +103,10 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
   const isRotatingRef = useRef(false);
   const prevVelocitiesRef = useRef({ x: 0, y: 0, theta: 0 });
   const commandThrottleRef = useRef<NodeJS.Timeout | null>(null);
+  // Single-shot key control tracking
+  const activeKeyRef = useRef<string | null>(null);
+  const keysHeldRef = useRef<Set<string>>(new Set());
+  const keysOrderRef = useRef<string[]>([]);
 
   const getSelectedRobotIp = useCallback((): string | null => {
     if (!selectedRobotId) return null;
@@ -186,11 +190,10 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
 
   // Emergency stop removed per request
 
-  // --- START: Keyboard Control Logic (continuous, global without focus) ---
+  // --- START: Keyboard Control Logic (single-shot on press, zero on release) ---
   useEffect(() => {
-    const KBD_SPEED_LINEAR = 0.3;
-    const KBD_ANGULAR_SPEED = 0.5;
-    const SEND_INTERVAL_MS = 100;
+    const KBD_SPEED_LINEAR = 0.3;  // Maps to dy/dx magnitude
+    const KBD_ANGULAR_SPEED = 0.5; // Scaled by maxAngular
     const kbRef = keyboardControlRef.current;
     if (!kbRef) return;
 
@@ -198,7 +201,22 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
     const handleBlur = () => {
       setHasFocus(false);
       setKeysPressed({ w: false, a: false, s: false, d: false, q: false, e: false });
+      // Clear all held keys and send zero once
+      keysHeldRef.current.clear();
+      keysOrderRef.current = [];
+      activeKeyRef.current = null;
       if (webSocketIsConnected && selectedRobotId) sendMotionRaw(0, 0, 0);
+    };
+    const mapKeyToVector = (key: string): { x: number; y: number; theta: number } => {
+      switch (key) {
+        case 'w': return { x: 0, y: SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed), theta: 0 };
+        case 's': return { x: 0, y: -SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed), theta: 0 };
+        case 'a': return { x: -SIGN_X * (KBD_SPEED_LINEAR * maxSpeed), y: 0, theta: 0 };
+        case 'd': return { x: SIGN_X * (KBD_SPEED_LINEAR * maxSpeed), y: 0, theta: 0 };
+        case 'q': return { x: 0, y: 0, theta: KBD_ANGULAR_SPEED * maxAngular };
+        case 'e': return { x: 0, y: 0, theta: -KBD_ANGULAR_SPEED * maxAngular };
+        default:  return { x: 0, y: 0, theta: 0 };
+      }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       // Cho phép điều khiển toàn cục; bỏ qua khi đang gõ trong input/textarea/select hoặc contentEditable
@@ -209,23 +227,16 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       const key = event.key.toLowerCase();
       if (["w","a","s","d","q","e"].includes(key)) {
         event.preventDefault();
-        // Cập nhật state giữ phím
+        // Ignore auto-repeat if key already held
+        if (keysHeldRef.current.has(key)) return;
+        keysHeldRef.current.add(key);
+        keysOrderRef.current.push(key);
         setKeysPressed(prev => ({ ...prev, [key]: true }));
-        // Gửi ngay một khung điều khiển để hỗ trợ nhấn-nhả nhanh (tap)
-        const next = { ...keysPressed, [key]: true } as KeysPressed;
-        let vx = 0, vy = 0, omg = 0;
-        // W/S điều khiển tiến/lùi trên trục dot_y, A/D điều khiển trái/phải trên trục dot_x
-        if (next.w) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.s) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.a) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.d) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.q) omg += KBD_ANGULAR_SPEED * maxAngular;
-        if (next.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
-        const isAny = next.w || next.a || next.s || next.d || next.q || next.e;
-        if (isAny && webSocketIsConnected && selectedRobotId) {
-          prevVelocitiesRef.current = { x: vx, y: vy, theta: omg };
-          sendMotionRaw(vx, vy, omg);
-        }
+        // Activate this key immediately and send single-shot command
+        activeKeyRef.current = key;
+        const v = mapKeyToVector(key);
+        prevVelocitiesRef.current = { x: v.x, y: v.y, theta: v.theta };
+        sendMotionRaw(v.x, v.y, v.theta);
       }
     };
     const handleKeyUp = (event: KeyboardEvent) => {
@@ -237,21 +248,21 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       if (["w","a","s","d","q","e"].includes(key)) {
         event.preventDefault();
         setKeysPressed(prev => ({ ...prev, [key]: false }));
-        // Gửi ngay để dừng hoặc điều chỉnh vector khi nhả phím
-        const next = { ...keysPressed, [key]: false } as KeysPressed;
-        let vx = 0, vy = 0, omg = 0;
-        if (next.w) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.s) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.a) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.d) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (next.q) omg += KBD_ANGULAR_SPEED * maxAngular;
-        if (next.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
-        const isAny = next.w || next.a || next.s || next.d || next.q || next.e;
-        if (webSocketIsConnected && selectedRobotId) {
-          if (isAny) {
-            prevVelocitiesRef.current = { x: vx, y: vy, theta: omg };
-            sendMotionRaw(vx, vy, omg);
+        if (keysHeldRef.current.has(key)) {
+          keysHeldRef.current.delete(key);
+          // Remove from order stack
+          keysOrderRef.current = keysOrderRef.current.filter(k => k !== key);
+        }
+        if (activeKeyRef.current === key) {
+          // If another key is still held, switch to that and send its vector once; otherwise send zero
+          const nextKey = keysOrderRef.current.length > 0 ? keysOrderRef.current[keysOrderRef.current.length - 1] : null;
+          if (nextKey) {
+            activeKeyRef.current = nextKey;
+            const v = mapKeyToVector(nextKey);
+            prevVelocitiesRef.current = { x: v.x, y: v.y, theta: v.theta };
+            sendMotionRaw(v.x, v.y, v.theta);
           } else {
+            activeKeyRef.current = null;
             prevVelocitiesRef.current = { x: 0, y: 0, theta: 0 };
             sendMotionRaw(0, 0, 0);
           }
@@ -259,46 +270,17 @@ const RobotControlWidget: React.FC<{ compact?: boolean }> = ({ compact = false }
       }
     };
 
-    let intervalId: any = null;
-    const startLoop = () => {
-      if (intervalId) return;
-      intervalId = setInterval(() => {
-        if (!webSocketIsConnected || !selectedRobotId) return;
-        let vx = 0, vy = 0, omg = 0;
-        if (keysPressed.w) vy += SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (keysPressed.s) vy -= SIGN_Y * (KBD_SPEED_LINEAR * maxSpeed);
-        if (keysPressed.a) vx -= SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (keysPressed.d) vx += SIGN_X * (KBD_SPEED_LINEAR * maxSpeed);
-        if (keysPressed.q) omg += KBD_ANGULAR_SPEED * maxAngular;
-        if (keysPressed.e) omg -= KBD_ANGULAR_SPEED * maxAngular;
-        const isAny = keysPressed.w || keysPressed.a || keysPressed.s || keysPressed.d || keysPressed.q || keysPressed.e;
-        if (isAny) {
-          prevVelocitiesRef.current = { x: vx, y: vy, theta: omg };
-          sendMotionRaw(vx, vy, omg);
-        } else {
-          const wasMoving = Math.abs(prevVelocitiesRef.current.x) > 1e-3 || Math.abs(prevVelocitiesRef.current.y) > 1e-3 || Math.abs(prevVelocitiesRef.current.theta) > 1e-3;
-          if (wasMoving) {
-            prevVelocitiesRef.current = { x: 0, y: 0, theta: 0 };
-            sendMotionRaw(0, 0, 0);
-          }
-        }
-      }, SEND_INTERVAL_MS);
-    };
-    const stopLoop = () => { if (intervalId) { clearInterval(intervalId); intervalId = null; } };
-
     kbRef.addEventListener('focus', handleFocus);
     kbRef.addEventListener('blur', handleBlur);
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-    startLoop();
     return () => {
-      stopLoop();
       kbRef.removeEventListener('focus', handleFocus);
       kbRef.removeEventListener('blur', handleBlur);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [hasFocus, webSocketIsConnected, selectedRobotId, maxSpeed, maxAngular, keysPressed, sendMotionRaw]);
+  }, [hasFocus, webSocketIsConnected, selectedRobotId, maxSpeed, maxAngular, sendMotionRaw]);
   // --- END: Keyboard Control Logic ---
 
   // --- START: Joystick Control Logic ---
